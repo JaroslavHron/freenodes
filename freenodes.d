@@ -1,7 +1,7 @@
 /**
  * Author: Jaroslav Hron <jaroslav.hron@mff.cuni.cz>
  * Date: May 28, 2015
- * Version: 1.0
+ * Version: 1.1
  * License: use freely for any purpose
  * Copyright: none
  **/
@@ -21,15 +21,16 @@ import core.time;
 
 // color support
 enum Color {
+  none =0,
   fgBlack = 30, fgRed, fgGreen, fgYellow, fgBlue, fgMagenta, fgCyan, fgWhite,
   bgBlack = 40, bgRed, bgGreen, bgYellow, bgBlue, bgMagenta, bgCyan, bgWhite
 }
 
 string color(string text, Color c) {
-  return "\033[" ~ c.to!int.to!string ~ "m" ~ text ~ "\033[0m";
+  if(c!=Color.none) return "\033[" ~ c.to!int.to!string ~ "m" ~ text ~ "\033[0m";
+  else return text;
 }
 
- 
 struct Node { 
   string name;
   int sockets; 
@@ -38,10 +39,14 @@ struct Node {
   int cpus;
   int cpu_alloc;
   int cores;
+  int mem;
+  int mem_alloc;
+  string features; 
+  bool[string] feature; 
   string state;
   string sload;
   float load;
-  string[] jobs;
+  int[] jobs;
 }
 
 struct Job { 
@@ -51,13 +56,18 @@ struct Job {
   string user;
   string run_time;
   string end_time;
+  string start_time;
+  string time_limit;
   string time;
   string state;
+  string reason;
+  int priority;
   int nodes;
   int tasks;
   int cpus_per_task;
   int ncpus;
   int[][string] cpus;
+  int[string] mem;
   string[] allocations;
 }
 
@@ -96,6 +106,17 @@ auto scontrol_count_cpuids(string cpuids)
   return(np);
 }
 
+auto scontrol_expand_hostsx(string hosts)
+{
+  int[] nh;
+  auto result=hosts.strip().split(",");
+  foreach(r; result) 
+    {
+      /* match and replace */
+    }
+  return(nh);
+}
+
 auto scontrol_expand_hosts(string node_list)
 {
   auto cmd=format("scontrol -a -o -d show hostname %s",node_list);
@@ -108,24 +129,27 @@ auto scontrol_jobs_info()
   auto cmd=format("scontrol -a -o -d show job");
   auto result=executeShell(cmd).output.strip().split("\n");
 
-  Job[string] jobs;
+  Job[int] jobs;
 
   foreach(int i, string l; result)
     {
-      auto id=matchFirst(l, r"(JobId)=([^ ]*)").captures[2];
       auto j=Job();
-      j.name=id;
-      j.id=to!int(id);
+      j.name=matchFirst(l, r"(Name)=([^ ]*)").captures[2];
+      j.id=matchFirst(l, r"(JobId)=([^ ]*)").captures[2].to!int;
+      j.priority=matchFirst(l, r"(Priority)=([^ ]*)").captures[2].to!int;
       j.state=matchFirst(l, r" (JobState)=([^ ]*)").captures[2];
+      j.reason=matchFirst(l, r" (Reason)=([^ ]*)").captures[2];
       j.partition=matchFirst(l, r" (Partition)=([^ ]*)").captures[2];
       j.user=matchFirst(l, r" (Account)=([^ ]*)").captures[2];
 
+      j.start_time=matchFirst(l, r" (StartTime)=([^ ]*)").captures[2];
       j.run_time=matchFirst(l, r" (RunTime)=([^ ]*)").captures[2];
-      j.end_time=matchFirst(l, r" (TimeLimit)=([^ ]*)").captures[2];
+      j.end_time=matchFirst(l, r" (EndTime)=([^ ]*)").captures[2];
+      j.time_limit=matchFirst(l, r" (TimeLimit)=([^ ]*)").captures[2];
       
       
       int dd=0;
-      auto tt=j.end_time.split("-");
+      auto tt=j.time_limit.split("-");
       if(tt.length>1) {dd=to!int(tt[0]); tt[0]=tt[1];}
       auto tt0=tt[0].split(":");
       auto dur1=days(dd)+hours(to!int(tt0[0]))+minutes(to!int(tt0[1]))+seconds(to!int(tt0[2]));
@@ -147,16 +171,17 @@ auto scontrol_jobs_info()
       string[] nl2;
       int np=0;
 
-      foreach(c; matchAll(l, r" (Nodes)=([^ ]*) (CPU_IDs)=([^ ]*)")) {
+      foreach(c; matchAll(l, r" (Nodes)=([^ ]*) (CPU_IDs)=([^ ]*) (Mem)=([^ ])")) {
         auto tmpn=scontrol_expand_hosts(c.captures[2]);
         auto tmpnp=scontrol_expand_cpuids(c.captures[4]);
-        foreach(k;tmpn) {np+=tmpnp.length; j.cpus[k]=tmpnp;}
+        auto mem=c.captures[6].to!int;
+        foreach(k;tmpn) {np+=tmpnp.length; j.cpus[k]=tmpnp; j.mem[k]=mem;}
         nl2 ~= tmpn;
       }
       j.tasks=np;
       j.allocations=nl2;
 
-      jobs[id]=j;
+      jobs[j.id]=j;
     }
   return(jobs);
 }
@@ -170,38 +195,73 @@ auto scontrol_nodes_info()
 
   foreach(int i, string l; result)
     {
-      auto id=match(l, r"(NodeName)=([^ ]*)").captures[2];
       auto n=Node();
-      n.name=id;
-      n.sockets=match(l, r"(Sockets)=([^ ]*)").captures[2].to!int;
-      n.cores_per_socket=match(l, r"(CoresPerSocket)=([^ ]*)").captures[2].to!int;
-      n.threads_per_core=match(l, r"(ThreadsPerCore)=([^ ]*)").captures[2].to!int;
-      n.cpus=match(l, r"(CPUTot)=([^ ]*)").captures[2].to!int;
-      n.cpu_alloc=match(l, r"(CPUAlloc)=([^ ]*)").captures[2].to!int;
-      n.sload=match(l, r"(CPULoad)=([^ ]*)").captures[2];
-      try n.load=n.sload.to!float;
-      catch (ConvException) n.load=-1.0;
-      n.state=match(l, r"(State)=([^ ]*)").captures[2];
+      n.name=matchFirst(l, r"(NodeName)=([^ ]*)").captures[2];;
+      n.sockets=matchFirst(l, r"(Sockets)=([^ ]*)").captures[2].to!int;
+      n.cores_per_socket=matchFirst(l, r"(CoresPerSocket)=([^ ]*)").captures[2].to!int;
+      n.threads_per_core=matchFirst(l, r"(ThreadsPerCore)=([^ ]*)").captures[2].to!int;
+      n.cpus=matchFirst(l, r"(CPUTot)=([^ ]*)").captures[2].to!int;
+      n.mem=matchFirst(l, r"(RealMemory)=([^ ]*)").captures[2].to!int;
+      n.mem_alloc=matchFirst(l, r"(AllocMem)=([^ ]*)").captures[2].to!int;
+      n.cpu_alloc=matchFirst(l, r"(CPUAlloc)=([^ ]*)").captures[2].to!int;
+      n.features=matchFirst(l, r"(Features)=([^ ]*)").captures[2].strip();
+      foreach(string f ; n.features.split(",")) n.feature[f]=true;
+      n.sload=matchFirst(l, r"(CPULoad)=([^ ]*)").captures[2];
+      try n.load=n.sload.to!float; catch (ConvException) n.load=-1.0;
+      n.state=matchFirst(l, r"(State)=([^ ]*)").captures[2];
       n.cores=n.sockets*n.cores_per_socket;
-      nodes[id]=n;
+      nodes[n.name]=n;
     }
   return(nodes);
 }
-
-
-
 
 
 bool display_user=false;
 bool display_time=false;
 bool display_id=false;
 
-string ids=".x!!!!!!-";
-//string ids="\u25AE"~"\u25AF"~"\u25AF";
+string ids=".+#!!!!!!";
 
+Color[string] part_color;
+string[string] status_name;
+
+
+auto create_core_map(Node node, Job job)
+{
+  auto sum=0;
+  char[] rmap;
+  int[] map;
+  char[] smap;
+  Color[] cmap;
+  
+  map.length=node.cores;
+  smap.length=node.cores;
+  cmap.length=node.cores;
+  rmap~=format("%s|",node.name);
+  
+  for(auto k=0; k<node.cores; k++) {map[k]=0; smap[k]=ids[0]; cmap[k]=part_color["free"];}
+  
+  if(job.state=="RUNNING") {
+    for(auto k=0; k<job.cpus[node.name].length ; k++) {
+      auto cpuid=job.cpus[node.name][k];
+      map[cpuid] +=1 ;
+      smap[cpuid] = ids[map[cpuid]];
+      cmap[cpuid]=part_color.get(job.partition,part_color["other"]);
+      sum+=1;
+    }
+  }
+  
+  for( auto k=0; k<node.cores; k++) rmap~=format("%s".color(cmap[k]),smap[k]);
+  
+  rmap~=format("|");
+  return(rmap);
+}
 
 void main(string[] args)
 {
+  part_color=[ "express":Color.fgRed, "short":Color.fgBlue, "long":Color.fgGreen, "other":Color.fgYellow, "free":Color.none, "debug":Color.fgMagenta ];
+
+  status_name=[ "ALLOCATED":"full", "IDLE":"free", "MIXED":"part" ];
 
   auto helpInformation = getopt(args, std.getopt.config.passThrough, std.getopt.config.bundling,
                                 "id|i", "Display the job id", &display_id,
@@ -211,20 +271,6 @@ void main(string[] args)
   auto nodes=executeShell("nodeattr -s ubuntu-14.04");
   if (nodes.status != 0) writeln("Failed to retrieve nodes listing");
   auto node_array=nodes.output.split();
-
-  Color[string] part_color;
-  part_color["express"]=Color.fgRed;
-  part_color["short"]=Color.fgBlue;
-  part_color["long"]=Color.fgGreen;
-  part_color["other"]=Color.fgYellow;
-  part_color["free"]=Color.fgCyan;
-  part_color["down"]=Color.fgMagenta;
-
-  string[string] status_name;
-  status_name["ALLOCATED"]="full";
-  status_name["IDLE"]="free";
-  status_name["MIXED"]="part";
-  status_name["DOWN"]="down";
 
   if (helpInformation.helpWanted)
     {
@@ -249,7 +295,7 @@ void main(string[] args)
 
   foreach ( j ; alljobs) 
     {
-      foreach( k ; j.allocations ) allnodes[k].jobs ~= j.name ;
+      foreach( k ; j.allocations ) allnodes[k].jobs ~= j.id ;
     }
 
   bool print_mark=false;
@@ -265,14 +311,11 @@ void main(string[] args)
       if (node.load>node.threads_per_core*node.cores+0.2) mark="!";
       if (mark!=" ") print_mark=true;
 
-      /*
-      if (node.load<0.0) load=color(load,Color.fgBlue);
-      if (node.load<0.2) load=color(load,Color.fgGreen);
-      else if (node.load<node.cores) load=color(load,Color.fgYellow);
-      else load=color(load,Color.fgRed);
-      */
+      auto net="-";
+      if ("InfiniBand" in node.feature) net="=";
       
-      writef("%1s%3s (%2d of %2d) %5s %s ",mark, node.name,node.cpu_alloc/node.threads_per_core, node.cores, status_name[node.state],load);
+      writef("%1s%3s%1s (%2d of %2d) %5s %s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name[node.state],load);
+
 
       auto sum=0;
       int[] map;
