@@ -1,7 +1,7 @@
 /**
  * Author: Jaroslav Hron <jaroslav.hron@mff.cuni.cz>
  * Date: May 28, 2015
- * Version: 1.1
+ * Version: 1.2
  * License: use freely for any purpose
  * Copyright: none
  **/
@@ -79,15 +79,13 @@ auto scontrol_expand_cpuids(string cpuids)
     {
       auto m=r.split("-");
       assert(m.length==1||m.length==2);
-      if(m.length==2) 
-        {
-          for(auto i=to!int(m[0]); i<=to!int(m[1]); i++)
-            np~=i;
-        }
-      if(m.length==1)
-        {
-          np~=to!int(m[0]);
-        }
+      if(m.length==2) {
+        for(auto i=to!int(m[0]); i<=to!int(m[1]); i++)
+          np~=i;
+      }
+      else if(m.length==1) {
+        np~=to!int(m[0]);
+      }
     }
   return(np);
 }
@@ -105,23 +103,33 @@ auto scontrol_count_cpuids(string cpuids)
     }
   return(np);
 }
-
-auto scontrol_expand_hostsx(string hosts)
+//Nodes=r[23,25-27] or Nodes=r21
+auto scontrol_expand_hosts(string hosts)
 {
-  int[] nh;
-  auto result=hosts.strip().split(",");
-  foreach(r; result) 
-    {
-      /* match and replace */
-    }
+  string[] nh;
+
+  auto ls=matchFirst(hosts, r"r([^ ]*)").captures[1];
+  auto ms=matchFirst(ls.strip(), r"\[([0-9,-]*)\]");
+  if (ms) {
+    auto result=ms.captures[1].strip().split(",");
+    foreach(r; result) 
+      {
+        auto m=r.split("-");
+        assert(m.length==1||m.length==2);
+        if(m.length==2) {
+          for(auto i=to!int(m[0]); i<=to!int(m[1]); i++)
+            nh~= "r"~to!string(i);
+        }
+        else if(m.length==1) {
+          nh~= "r"~m[0];
+        }
+      }
+  }
+  else {
+    nh~= "r"~ls;    
+  }
+ 
   return(nh);
-}
-
-auto scontrol_expand_hosts(string node_list)
-{
-  auto cmd=format("scontrol -a -o -d show hostname %s",node_list);
-  auto result=executeShell(cmd).output.strip().split("\n");
-  return(result);
 }
 
 auto scontrol_jobs_info()
