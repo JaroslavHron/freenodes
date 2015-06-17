@@ -108,8 +108,10 @@ auto scontrol_expand_hosts(string hosts)
 {
   string[] nh;
 
-  auto ls=matchFirst(hosts, r"r([^ ]*)").captures[1];
-  auto ms=matchFirst(ls.strip(), r"\[([0-9,-]*)\]");
+  auto pat1=regex(r"r([^ ]*)");
+  auto ls=matchFirst(hosts, pat1).captures[1];
+  auto pat2=regex(r"\[([0-9,-]*)\]");
+  auto ms=matchFirst(ls.strip(), pat2);
   if (ms) {
     auto result=ms.captures[1].strip().split(",");
     foreach(r; result) 
@@ -142,7 +144,7 @@ auto scontrol_jobs_info()
   foreach(int i, string l; result)
     {
       auto j=Job();
-      j.name=matchFirst(l, r"(Name)=([^ ]*)").captures[2];
+      j.name=matchFirst(l, regex(r"(Name)=([^ ]*)")).captures[2];
       j.id=matchFirst(l, r"(JobId)=([^ ]*)").captures[2].to!int;
       j.priority=matchFirst(l, r"(Priority)=([^ ]*)").captures[2].to!int;
       j.state=matchFirst(l, r" (JobState)=([^ ]*)").captures[2];
