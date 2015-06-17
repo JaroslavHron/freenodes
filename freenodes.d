@@ -17,6 +17,7 @@ import std.array;
 import std.conv;
 import std.getopt;
 import std.regex;
+import std.exception;
 import core.time;
 
 // color support
@@ -137,25 +138,27 @@ auto scontrol_expand_hosts(string hosts)
 auto scontrol_jobs_info()
 {
   auto cmd=format("scontrol -a -o -d show job");
-  auto result=executeShell(cmd).output.strip().split("\n");
+  auto result=executeShell(cmd);
+  enforce( result.status == 0 , "Failed to call scontrol utility.\n"~result.output);
+  auto output=result.output.strip().split("\n");
 
   Job[int] jobs;
 
-  foreach(int i, string l; result)
+  foreach(int i, string l; output)
     {
       auto j=Job();
       j.name=matchFirst(l, regex(r"(Name)=([^ ]*)")).captures[2];
-      j.id=matchFirst(l, r"(JobId)=([^ ]*)").captures[2].to!int;
-      j.priority=matchFirst(l, r"(Priority)=([^ ]*)").captures[2].to!int;
-      j.state=matchFirst(l, r" (JobState)=([^ ]*)").captures[2];
-      j.reason=matchFirst(l, r" (Reason)=([^ ]*)").captures[2];
-      j.partition=matchFirst(l, r" (Partition)=([^ ]*)").captures[2];
-      j.user=matchFirst(l, r" (Account)=([^ ]*)").captures[2];
+      j.id=matchFirst(l, regex(r"(JobId)=([^ ]*)")).captures[2].to!int;
+      j.priority=matchFirst(l, regex(r"(Priority)=([^ ]*)")).captures[2].to!int;
+      j.state=matchFirst(l, regex(r" (JobState)=([^ ]*)")).captures[2];
+      j.reason=matchFirst(l, regex(r" (Reason)=([^ ]*)")).captures[2];
+      j.partition=matchFirst(l, regex(r" (Partition)=([^ ]*)")).captures[2];
+      j.user=matchFirst(l, regex(r" (Account)=([^ ]*)")).captures[2];
 
-      j.start_time=matchFirst(l, r" (StartTime)=([^ ]*)").captures[2];
-      j.run_time=matchFirst(l, r" (RunTime)=([^ ]*)").captures[2];
-      j.end_time=matchFirst(l, r" (EndTime)=([^ ]*)").captures[2];
-      j.time_limit=matchFirst(l, r" (TimeLimit)=([^ ]*)").captures[2];
+      j.start_time=matchFirst(l, regex(r" (StartTime)=([^ ]*)")).captures[2];
+      j.run_time=matchFirst(l, regex(r" (RunTime)=([^ ]*)")).captures[2];
+      j.end_time=matchFirst(l, regex(r" (EndTime)=([^ ]*)")).captures[2];
+      j.time_limit=matchFirst(l, regex(r" (TimeLimit)=([^ ]*)")).captures[2];
       
       
       int dd=0;
@@ -172,16 +175,16 @@ auto scontrol_jobs_info()
       auto s = dur0.split!("days", "hours", "minutes", "seconds")();
       j.time=format("%d-%02d:%02d:%02d",s.days,s.hours,s.minutes,s.seconds);
 
-      j.nodes=matchFirst(l, r" (NumNodes)=([^ ]*)").captures[2].to!int;
-      j.ncpus=matchFirst(l, r" (NumCPUs)=([^ ]*)").captures[2].to!int;
-      j.cpus_per_task=matchFirst(l, r" (CPUs/Task)=([^ ]*)").captures[2].to!int;
-      auto nl=matchFirst(l, r" (NodeList)=([^ ]*)").captures[2];
+      j.nodes=matchFirst(l, regex(r" (NumNodes)=([^ ]*)")).captures[2].to!int;
+      j.ncpus=matchFirst(l, regex(r" (NumCPUs)=([^ ]*)")).captures[2].to!int;
+      j.cpus_per_task=matchFirst(l, regex(r" (CPUs/Task)=([^ ]*)")).captures[2].to!int;
+      auto nl=matchFirst(l, regex(r" (NodeList)=([^ ]*)")).captures[2];
       auto nlex=scontrol_expand_hosts(nl);
       
       string[] nl2;
       int np=0;
 
-      foreach(c; matchAll(l, r" (Nodes)=([^ ]*) (CPU_IDs)=([^ ]*) (Mem)=([^ ])")) {
+      foreach(c; matchAll(l, regex(r" (Nodes)=([^ ]*) (CPU_IDs)=([^ ]*) (Mem)=([^ ])"))) {
         auto tmpn=scontrol_expand_hosts(c.captures[2]);
         auto tmpnp=scontrol_expand_cpuids(c.captures[4]);
         auto mem=c.captures[6].to!int;
@@ -199,26 +202,28 @@ auto scontrol_jobs_info()
 auto scontrol_nodes_info()
 {
   auto cmd=format("scontrol -a -o -d show node");
-  auto result=executeShell(cmd).output.strip().split("\n");
+  auto result=executeShell(cmd);
+  enforce(result.status == 0 , "Failed to call scontrol utility.\n"~result.output);
+  auto output=result.output.strip().split("\n");
 
   Node[string] nodes;
 
-  foreach(int i, string l; result)
+  foreach(int i, string l; output)
     {
       auto n=Node();
-      n.name=matchFirst(l, r"(NodeName)=([^ ]*)").captures[2];;
-      n.sockets=matchFirst(l, r"(Sockets)=([^ ]*)").captures[2].to!int;
-      n.cores_per_socket=matchFirst(l, r"(CoresPerSocket)=([^ ]*)").captures[2].to!int;
-      n.threads_per_core=matchFirst(l, r"(ThreadsPerCore)=([^ ]*)").captures[2].to!int;
-      n.cpus=matchFirst(l, r"(CPUTot)=([^ ]*)").captures[2].to!int;
-      n.mem=matchFirst(l, r"(RealMemory)=([^ ]*)").captures[2].to!int;
-      n.mem_alloc=matchFirst(l, r"(AllocMem)=([^ ]*)").captures[2].to!int;
-      n.cpu_alloc=matchFirst(l, r"(CPUAlloc)=([^ ]*)").captures[2].to!int;
-      n.features=matchFirst(l, r"(Features)=([^ ]*)").captures[2].strip();
+      n.name=matchFirst(l, regex(r"(NodeName)=([^ ]*)")).captures[2];;
+      n.sockets=matchFirst(l, regex(r"(Sockets)=([^ ]*)")).captures[2].to!int;
+      n.cores_per_socket=matchFirst(l, regex(r"(CoresPerSocket)=([^ ]*)")).captures[2].to!int;
+      n.threads_per_core=matchFirst(l, regex(r"(ThreadsPerCore)=([^ ]*)")).captures[2].to!int;
+      n.cpus=matchFirst(l, regex(r"(CPUTot)=([^ ]*)")).captures[2].to!int;
+      n.mem=matchFirst(l, regex(r"(RealMemory)=([^ ]*)")).captures[2].to!int;
+      n.mem_alloc=matchFirst(l, regex(r"(AllocMem)=([^ ]*)")).captures[2].to!int;
+      n.cpu_alloc=matchFirst(l, regex(r"(CPUAlloc)=([^ ]*)")).captures[2].to!int;
+      n.features=matchFirst(l, regex(r"(Features)=([^ ]*)")).captures[2].strip();
       foreach(string f ; n.features.split(",")) n.feature[f]=true;
-      n.sload=matchFirst(l, r"(CPULoad)=([^ ]*)").captures[2];
+      n.sload=matchFirst(l, regex(r"(CPULoad)=([^ ]*)")).captures[2];
       try n.load=n.sload.to!float; catch (ConvException) n.load=-1.0;
-      n.state=matchFirst(l, r"(State)=([^ ]*)").captures[2];
+      n.state=matchFirst(l, regex(r"(State)=([^ ]*)")).captures[2];
       n.cores=n.sockets*n.cores_per_socket;
       nodes[n.name]=n;
     }
@@ -279,7 +284,8 @@ void main(string[] args)
                                 "user|u", "Display the user names", &display_user);
 
   auto nodes=executeShell("nodeattr -s ubuntu-14.04");
-  if (nodes.status != 0) writeln("Failed to retrieve nodes listing");
+  enforce(nodes.status == 0 , "Failed to call nodeattr utility.",nodes.output);
+
   auto node_array=nodes.output.split();
 
   if (helpInformation.helpWanted)
@@ -298,8 +304,6 @@ void main(string[] args)
     head~="cores]";
   }
 
-  writeln("node busy cores state   load allocated cores in ", "express".color(part_color["express"]),"/", "short".color(part_color["short"]),"/", "long".color(part_color["long"]),"/", "other".color(part_color["other"]),head);
-
   auto allnodes=scontrol_nodes_info();
   auto alljobs=scontrol_jobs_info();
 
@@ -309,6 +313,8 @@ void main(string[] args)
     }
 
   bool print_mark=false;
+
+  writeln("node busy cores state   load allocated cores in ", "express".color(part_color["express"]),"/", "short".color(part_color["short"]),"/", "long".color(part_color["long"]),"/", "other".color(part_color["other"]),head);
 
   foreach (int i, string node_name; node_array)
     {
