@@ -18,7 +18,9 @@ import std.conv;
 import std.getopt;
 import std.regex;
 import std.exception;
-import core.time;
+import std.algorithm;
+import std.datetime;
+//import core.time;
 
 // color support
 enum Color {
@@ -55,15 +57,16 @@ struct Job {
   string name;
   string partition;
   string user;
-  string run_time;
-  string end_time;
-  string start_time;
-  string time_limit;
-  string time;
+  DateTime submit_time;
+  DateTime start_time;
+  DateTime end_time;
+  Duration run_time;
+  Duration time_limit;
+  Duration time;
   string state;
   string reason;
   int priority;
-  int nodes;
+  string nodes;
   int tasks;
   int cpus_per_task;
   int ncpus;
@@ -104,6 +107,7 @@ auto scontrol_count_cpuids(string cpuids)
     }
   return(np);
 }
+
 //Nodes=r[23,25-27] or Nodes=r21
 auto scontrol_expand_hosts(string hosts)
 {
@@ -135,6 +139,24 @@ auto scontrol_expand_hosts(string hosts)
   return(nh);
 }
 
+Duration parse_time_interval(string t)
+{
+  // parse interval in the form  [days-]hh:mm:ss
+  
+  auto s=t.split("-");
+
+  int ndays=0;
+  string time;
+  
+  if(s.length>1) {ndays=to!int(s[0]); time=s[1];}
+  else {time=s[0];}
+
+  auto m=time.split(":");
+
+  auto dur=days(ndays)+hours(to!int(m[0]))+minutes(to!int(m[1]))+seconds(to!int(m[2]));
+  return(dur);
+}
+
 auto scontrol_jobs_info()
 {
   auto cmd=format("scontrol -a -o -d show job");
@@ -155,27 +177,22 @@ auto scontrol_jobs_info()
       j.partition=matchFirst(l, regex(r" (Partition)=([^ ]*)")).captures[2];
       j.user=matchFirst(l, regex(r" (Account)=([^ ]*)")).captures[2];
 
-      j.start_time=matchFirst(l, regex(r" (StartTime)=([^ ]*)")).captures[2];
-      j.run_time=matchFirst(l, regex(r" (RunTime)=([^ ]*)")).captures[2];
-      j.end_time=matchFirst(l, regex(r" (EndTime)=([^ ]*)")).captures[2];
-      j.time_limit=matchFirst(l, regex(r" (TimeLimit)=([^ ]*)")).captures[2];
-      
-      
-      int dd=0;
-      auto tt=j.time_limit.split("-");
-      if(tt.length>1) {dd=to!int(tt[0]); tt[0]=tt[1];}
-      auto tt0=tt[0].split(":");
-      auto dur1=days(dd)+hours(to!int(tt0[0]))+minutes(to!int(tt0[1]))+seconds(to!int(tt0[2]));
-      tt=j.run_time.split("-");
-      dd=0;
-      if(tt.length>1) {dd=to!int(tt[0]); tt[0]=tt[1];}
-      tt0=tt[0].split(":");
-      auto dur2=days(dd)+hours(to!int(tt0[0]))+minutes(to!int(tt0[1]))+seconds(to!int(tt0[2]));
-      auto dur0=dur1-dur2;
-      auto s = dur0.split!("days", "hours", "minutes", "seconds")();
-      j.time=format("%d-%02d:%02d:%02d",s.days,s.hours,s.minutes,s.seconds);
+      j.run_time=parse_time_interval(matchFirst(l, regex(r" (RunTime)=([^ ]*)")).captures[2]);
+      j.time_limit=parse_time_interval(matchFirst(l, regex(r" (TimeLimit)=([^ ]*)")).captures[2]); 
 
-      j.nodes=matchFirst(l, regex(r" (NumNodes)=([^ ]*)")).captures[2].to!int;
+      j.submit_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (SubmitTime)=([^ ]*)")).captures[2]);
+      try j.start_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (StartTime)=([^ ]*)")).captures[2]);
+      catch(TimeException) j.start_time=j.submit_time;
+      if(j.state=="RUNNING") j.end_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (EndTime)=([^ ]*)")).captures[2]);
+      else j.end_time=j.start_time+j.time_limit;
+     
+      
+      auto dur0=j.time_limit-j.run_time;
+      //auto s = dur0.split!("days", "hours", "minutes", "seconds")();
+      //j.time=format("%d-%02d:%02d:%02d",s.days,s.hours,s.minutes,s.seconds);
+      j.time=dur0;
+      
+      j.nodes=matchFirst(l, regex(r" (NumNodes)=([^ ]*)")).captures[2];
       j.ncpus=matchFirst(l, regex(r" (NumCPUs)=([^ ]*)")).captures[2].to!int;
       j.cpus_per_task=matchFirst(l, regex(r" (CPUs/Task)=([^ ]*)")).captures[2].to!int;
       auto nl=matchFirst(l, regex(r" (NodeList)=([^ ]*)")).captures[2];
@@ -235,7 +252,7 @@ bool display_user=false;
 bool display_time=false;
 bool display_id=false;
 
-string ids=".+#!!!!!!";
+string ids=".x#!!!!!!";
 
 Color[string] part_color;
 string[string] status_name;
@@ -330,8 +347,7 @@ void main(string[] args)
       auto net="-";
       if ("InfiniBand" in node.feature) net="=";
       
-      writef("%1s%3s%1s (%2d of %2d) %5s %s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name[node.state],load);
-
+      writef("%1s%3s%1s (%2d of %2d) %5s %s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"unknown"),load);
 
       auto sum=0;
       int[] map;
@@ -381,7 +397,10 @@ void main(string[] args)
               string id="";
               if (display_id) id~=format("%s|",job.id);
               if (display_user) id~=format("%s|",job.user);
-              if (display_time) id~=format("%s|",job.time);
+              if (display_time) {
+                auto ts=job.time.split!("hours","minutes")();
+                id~=format("%d:%02d|",ts.hours,ts.minutes);
+              }
               writef("[");
               writef("%s".color(part_color.get(job.partition,part_color["other"])),id);
               writef("%d".color(part_color.get(job.partition,part_color["other"])),job.cpus[node.name].length);

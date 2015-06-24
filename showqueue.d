@@ -57,6 +57,7 @@ struct Job {
   string name;
   string partition;
   string user;
+  DateTime submit_time;
   DateTime start_time;
   DateTime end_time;
   Duration run_time;
@@ -65,7 +66,7 @@ struct Job {
   string state;
   string reason;
   int priority;
-  int nodes;
+  string nodes;
   int tasks;
   int cpus_per_task;
   int ncpus;
@@ -178,7 +179,9 @@ auto scontrol_jobs_info()
       j.run_time=parse_time_interval(matchFirst(l, regex(r" (RunTime)=([^ ]*)")).captures[2]);
       j.time_limit=parse_time_interval(matchFirst(l, regex(r" (TimeLimit)=([^ ]*)")).captures[2]); 
 
-      j.start_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (StartTime)=([^ ]*)")).captures[2]);
+      j.submit_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (SubmitTime)=([^ ]*)")).captures[2]);
+      try j.start_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (StartTime)=([^ ]*)")).captures[2]);
+      catch(TimeException) j.start_time=j.submit_time;
       if(j.state=="RUNNING") j.end_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (EndTime)=([^ ]*)")).captures[2]);
       else j.end_time=j.start_time+j.time_limit;
      
@@ -188,7 +191,7 @@ auto scontrol_jobs_info()
       //j.time=format("%d-%02d:%02d:%02d",s.days,s.hours,s.minutes,s.seconds);
       j.time=dur0;
       
-      j.nodes=matchFirst(l, regex(r" (NumNodes)=([^ ]*)")).captures[2].to!int;
+      j.nodes=matchFirst(l, regex(r" (NumNodes)=([^ ]*)")).captures[2];
       j.ncpus=matchFirst(l, regex(r" (NumCPUs)=([^ ]*)")).captures[2].to!int;
       j.cpus_per_task=matchFirst(l, regex(r" (CPUs/Task)=([^ ]*)")).captures[2].to!int;
       auto nl=matchFirst(l, regex(r" (NodeList)=([^ ]*)")).captures[2];
@@ -248,7 +251,7 @@ bool display_running=false;
 bool display_pending=false;
 bool display_cancelled=false;
 
-string ids=".+#!!!!!!";
+string ids=".x#!!!!!!";
 
 Color[string] part_color;
 string[string] status_name;
@@ -358,7 +361,7 @@ void main(string[] args)
       writef("%5d %8s %10s %6d",j.id,j.partition,j.user,j.priority);
       auto ets=j.start_time-cast(DateTime)(Clock.currTime());
       auto ts=ets.split!("hours","minutes")();
-      writefln(" %s waiting for %s (%s, %d nodes, %d cpus) - estimated start in %4d:%02d",j.state,j.reason,j.time,j.nodes,j.ncpus,ts.hours,ts.minutes);
+      writefln(" %s waiting for %s (%s, %s nodes, %d cpus) - estimated start in %4d:%02d",j.state,j.reason,j.time,j.nodes,j.ncpus,ts.hours,ts.minutes);
     }
 
   
