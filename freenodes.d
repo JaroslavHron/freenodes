@@ -1,7 +1,7 @@
 /**
  * Author: Jaroslav Hron <jaroslav.hron@mff.cuni.cz>
  * Date: May 28, 2015
- * Version: 1.2
+ * Version: 1.3
  * License: use freely for any purpose
  * Copyright: none
  **/
@@ -157,6 +157,7 @@ Duration parse_time_interval(string t)
   return(dur);
 }
 
+
 auto scontrol_jobs_info()
 {
   auto cmd=format("scontrol -a -o -d show job");
@@ -165,6 +166,8 @@ auto scontrol_jobs_info()
   auto output=result.output.strip().split("\n");
 
   Job[int] jobs;
+
+  if(!cmp(output[0],"No jobs in the system")) return(jobs);
 
   foreach(int i, string l; output)
     {
@@ -248,9 +251,9 @@ auto scontrol_nodes_info()
 }
 
 
-bool display_user=false;
-bool display_time=false;
-bool display_id=false;
+bool display_user=true;
+bool display_time=true;
+bool display_id=true;
 
 string ids=".x#!!!!!!";
 
@@ -331,7 +334,7 @@ void main(string[] args)
 
   bool print_mark=false;
 
-  writeln("node busy cores state   load allocated cores in ", "express".color(part_color["express"]),"/", "short".color(part_color["short"]),"/", "long".color(part_color["long"]),"/", "other".color(part_color["other"]),head);
+  writeln("node  busy cores  state  load allocated cores in ", "express".color(part_color["express"]),"/", "short".color(part_color["short"]),"/", "long".color(part_color["long"]),"/", "other".color(part_color["other"]),head);
 
   foreach (int i, string node_name; node_array)
     {
@@ -357,6 +360,9 @@ void main(string[] args)
       map.length=node.cores;
       smap.length=node.cores;
       cmap.length=node.cores;
+
+      //writeln("x",node,node.jobs,"x");
+
       writef("|");
 
       for(auto k=0; k<node.cores; k++) {map[k]=0; smap[k]=ids[0]; cmap[k]=part_color["free"];}
@@ -364,9 +370,12 @@ void main(string[] args)
       foreach ( j; node.jobs)
         {
           auto job=alljobs[j];
+          //writeln("x",job,"x");
           if(job.state=="RUNNING") {
-            for(auto k=0; k<job.cpus[node.name].length ; k++) {
-              auto cpuid=job.cpus[node.name][k];
+            for(auto k=0; k<job.cpus[node.name].length ; k+=2) {
+              auto cpuid=to!int(job.cpus[node.name][k]/2);
+              //if(cpuid>=node.cores) cpuid-=node.cores;
+              //writeln(">",k,cpuid,node.cores);
               map[cpuid] +=1 ;
               if(node.state=="DOWN") {
                 smap[cpuid] = ids[8];
@@ -403,13 +412,23 @@ void main(string[] args)
               }
               writef("[");
               writef("%s".color(part_color.get(job.partition,part_color["other"])),id);
-              writef("%d".color(part_color.get(job.partition,part_color["other"])),job.cpus[node.name].length);
+              writef("%d".color(part_color.get(job.partition,part_color["other"])),job.cpus[node.name].length/2);
               writef("] ");
               }
             }
         }
       writeln("");
     }
+
+  Job[] running, pending, cancelled;
+  foreach (j; alljobs) {
+    if(j.state=="RUNNING") running ~= j;
+    if(j.state=="PENDING") pending ~= j;
+    if(j.state=="CANCELLED") cancelled ~= j;
+  }
+
+  writefln("There are %d running jobs and %d queued pending jobs.",running.length, pending.length);
+
   if(print_mark) writeln("Notes: !-marked nodes are overcommited or busy with job outside the slurm control.");
 }
 
