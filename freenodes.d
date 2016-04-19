@@ -1,7 +1,7 @@
 /**
  * Author: Jaroslav Hron <jaroslav.hron@mff.cuni.cz>
  * Date: May 28, 2015
- * Version: 1.3
+ * Version: 1.4
  * License: use freely for any purpose
  * Copyright: none
  **/
@@ -50,6 +50,16 @@ struct Node {
   string sload;
   float load;
   int[] jobs;
+}
+
+struct Part { 
+  string name;
+  Color color;
+  bool[string] feature;
+  Duration max_time;
+  string[] nodes;
+  int priority;
+  int cores;
 }
 
 struct Job { 
@@ -158,6 +168,34 @@ Duration parse_time_interval(string t)
 }
 
 
+auto scontrol_parts_info()
+{
+  auto cmd=format("scontrol -a -o -d show part");
+  auto result=executeShell(cmd);
+  enforce( result.status == 0 , "Failed to call scontrol utility.\n"~result.output);
+  auto output=result.output.strip().split("\n");
+
+  Part[string] parts;
+
+  foreach(int i, string l; output)
+    {
+      auto p=Part();
+      p.name=matchFirst(l, regex(r"(PartitionName)=([^ ]*)")).captures[2];
+      p.max_time=parse_time_interval(matchFirst(l, regex(r" (MaxTime)=([^ ]*)")).captures[2]); 
+      
+      p.priority=matchFirst(l, regex(r" (Priority)=([^ ]*)")).captures[2].to!int;
+      p.cores=matchFirst(l, regex(r" (TotalCPUs)=([^ ]*)")).captures[2].to!int;
+
+      auto nl=matchFirst(l, regex(r" (Nodes)=([^ ]*)")).captures[2];
+      auto nlex=scontrol_expand_hosts(nl);
+
+      p.nodes=nlex;
+
+      parts[p.name]=p;
+    }
+  return(parts);
+}
+
 auto scontrol_jobs_info()
 {
   auto cmd=format("scontrol -a -o -d show job");
@@ -254,6 +292,8 @@ auto scontrol_nodes_info()
 bool display_user=true;
 bool display_time=true;
 bool display_id=true;
+bool display_running=true;
+bool display_pending=true;
 
 string ids=".x#!!!!!!";
 
@@ -326,6 +366,10 @@ void main(string[] args)
 
   auto allnodes=scontrol_nodes_info();
   auto alljobs=scontrol_jobs_info();
+  auto allparts=scontrol_parts_info();
+
+  foreach ( p ; allparts ) { 
+    p.color = part_color.get(p.name, part_color["other"]); }
 
   foreach ( j ; alljobs) 
     {
@@ -333,6 +377,10 @@ void main(string[] args)
     }
 
   bool print_mark=false;
+
+  //writeln(allnodes);
+  //writeln(alljobs);
+  //writeln(allparts);
 
   writeln("node  busy cores  state  load allocated cores in ", "express".color(part_color["express"]),"/", "short".color(part_color["short"]),"/", "long".color(part_color["long"]),"/", "other".color(part_color["other"]),head);
 
@@ -413,7 +461,7 @@ void main(string[] args)
               writef("[");
               writef("%s".color(part_color.get(job.partition,part_color["other"])),id);
               writef("%d".color(part_color.get(job.partition,part_color["other"])),job.cpus[node.name].length/2);
-              writef("] ");
+              writef("]");
               }
             }
         }
@@ -427,7 +475,27 @@ void main(string[] args)
     if(j.state=="CANCELLED") cancelled ~= j;
   }
 
-  writefln("There are %d running jobs and %d queued pending jobs.",running.length, pending.length);
+  writef("There are %d running jobs", running.length);
+  if (pending.length>0) writefln(" and %d queued pending jobs.", pending.length);
+  else writeln(".");
+
+  sort!("a.priority < b.priority")(pending);
+
+  if (display_pending) foreach( j; pending)
+    {
+      writef("%5d %8s %10s %6d",j.id,j.partition,j.user,j.priority);
+      auto ets=j.start_time-cast(DateTime)(Clock.currTime());
+      auto ts=ets.split!("hours","minutes")();
+      writefln(" %s waiting for %s (%s, %s nodes, %d cpus) - estimated start in %4d:%02d",j.state,j.reason,j.time,j.nodes,j.ncpus,ts.hours,ts.minutes);
+    }
+
+  foreach ( p ; allparts ) { 
+    writef("%12s ".color(p.color),p.name);
+    writef(" cores: %3d", p.cores/2);
+    for (auto i=0; i<p.nodes.length; i++ ) { writef("."); }
+    writef("\n");
+ }
+  
 
   if(print_mark) writeln("Notes: !-marked nodes are overcommited or busy with job outside the slurm control.");
 }
