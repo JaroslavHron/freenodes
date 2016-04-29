@@ -23,7 +23,7 @@ import std.datetime;
 //import core.time;
 
 // color support
-enum Color {
+enum Color : int {
   none =0,
   fgBlack = 30, fgRed, fgGreen, fgYellow, fgBlue, fgMagenta, fgCyan, fgWhite,
   bgBlack = 40, bgRed, bgGreen, bgYellow, bgBlue, bgMagenta, bgCyan, bgWhite
@@ -60,6 +60,9 @@ struct Part {
   string[] nodes;
   int priority;
   int cores;
+  int[] jobs;
+  int[] running;
+  int[] pending;
 }
 
 struct Job { 
@@ -76,7 +79,7 @@ struct Job {
   string state;
   string reason;
   int priority;
-  string nodes;
+  int nodes;
   int tasks;
   int cpus_per_task;
   int ncpus;
@@ -190,6 +193,7 @@ auto scontrol_parts_info()
       auto nlex=scontrol_expand_hosts(nl);
 
       p.nodes=nlex;
+      p.color=Color.none;
 
       parts[p.name]=p;
     }
@@ -233,7 +237,7 @@ auto scontrol_jobs_info()
       //j.time=format("%d-%02d:%02d:%02d",s.days,s.hours,s.minutes,s.seconds);
       j.time=dur0;
       
-      j.nodes=matchFirst(l, regex(r" (NumNodes)=([^ ]*)")).captures[2];
+      j.nodes=matchFirst(l, regex(r" (NumNodes)=([^ ]*)")).captures[2].to!int;
       j.ncpus=matchFirst(l, regex(r" (NumCPUs)=([^ ]*)")).captures[2].to!int;
       j.cpus_per_task=matchFirst(l, regex(r" (CPUs/Task)=([^ ]*)")).captures[2].to!int;
       auto nl=matchFirst(l, regex(r" (NodeList)=([^ ]*)")).captures[2];
@@ -292,8 +296,8 @@ auto scontrol_nodes_info()
 bool display_user=true;
 bool display_time=true;
 bool display_id=true;
-bool display_running=true;
-bool display_pending=true;
+bool display_running=false;
+bool display_pending=false;
 
 string ids=".x#!!!!!!";
 
@@ -334,14 +338,16 @@ auto create_core_map(Node node, Job job)
 
 void main(string[] args)
 {
-  part_color=[ "express":Color.fgRed, "short":Color.fgBlue, "long":Color.fgGreen, "other":Color.fgYellow, "free":Color.none, "debug":Color.fgMagenta ];
+  part_color=[ "express":Color.fgRed, "short":Color.fgBlue, "long":Color.fgGreen, "biomechanics":Color.fgYellow, "free":Color.none, "debug":Color.fgMagenta, "test":Color.fgMagenta, "other":Color.fgWhite ];
 
   status_name=[ "ALLOCATED":"full", "IDLE":"free", "MIXED":"part" ];
 
   auto helpInformation = getopt(args, std.getopt.config.passThrough, std.getopt.config.bundling,
                                 "id|i", "Display the job id", &display_id,
                                 "time|t", "Display the remaining time of the job allocation", &display_time,
-                                "user|u", "Display the user names", &display_user);
+                                "user|u", "Display the user names", &display_user,
+                                "running|r", "Display the list of running jobs", &display_running,
+                                "pending|p", "Display the list of pending jobs", &display_pending);
 
   auto nodes=executeShell("nodeattr -s ubuntu-14.04");
   enforce(nodes.status == 0 , "Failed to call nodeattr utility.",nodes.output);
@@ -368,12 +374,18 @@ void main(string[] args)
   auto alljobs=scontrol_jobs_info();
   auto allparts=scontrol_parts_info();
 
-  foreach ( p ; allparts ) { 
-    p.color = part_color.get(p.name, part_color["other"]); }
+  foreach ( i, p ; allparts ) { 
+    if(!(p.name in part_color)) part_color[p.name]=Color.fgCyan;
+    //p.color = part_color[p.name]; !!!!! this doesnt work
+    allparts[i].color = part_color[p.name];  ///while this is OK
+  }
 
   foreach ( j ; alljobs) 
     {
       foreach( k ; j.allocations ) allnodes[k].jobs ~= j.id ;
+      allparts[j.partition].jobs ~= j.id ;
+      if(j.state=="RUNNING") allparts[j.partition].running ~= j.id;
+      else if(j.state=="PENDING") allparts[j.partition].pending ~= j.id;
     }
 
   bool print_mark=false;
@@ -382,7 +394,13 @@ void main(string[] args)
   //writeln(alljobs);
   //writeln(allparts);
 
-  writeln("node  busy cores  state  load allocated cores in ", "express".color(part_color["express"]),"/", "short".color(part_color["short"]),"/", "long".color(part_color["long"]),"/", "other".color(part_color["other"]),head);
+  writef("node  busy cores  state  load allocated cores in /");
+
+  foreach( p ; allparts) {
+    writef("%s".color(p.color),p.name);
+    writef("/");
+  }
+  writeln(" partition");
 
   foreach (int i, string node_name; node_array)
     {
@@ -481,18 +499,36 @@ void main(string[] args)
 
   sort!("a.priority < b.priority")(pending);
 
-  if (display_pending) foreach( j; pending)
+  if (display_running) foreach( j; running)
     {
-      writef("%5d %8s %10s %6d",j.id,j.partition,j.user,j.priority);
+      writef("%5d ",j.id);
+      writef("%8s ".color(allparts[j.partition].color),j.partition);
+      writef("%10s ",j.user,);
       auto ets=j.start_time-cast(DateTime)(Clock.currTime());
       auto ts=ets.split!("hours","minutes")();
-      writefln(" %s waiting for %s (%s, %s nodes, %d cpus) - estimated start in %4d:%02d",j.state,j.reason,j.time,j.nodes,j.ncpus,ts.hours,ts.minutes);
+      writefln(" %s [ %2d nodes, %4d cores] - remining time: %s",j.state,j.nodes,j.ncpus,j.time);
     }
 
+  if (display_pending) foreach( j; pending ~ cancelled)
+    {
+      writef("%5d ",j.id);
+      writef("%8s ".color(allparts[j.partition].color),j.partition);
+      writef("%10s %6d",j.user,j.priority);
+      auto ets=j.start_time-cast(DateTime)(Clock.currTime());
+      auto ts=ets.split!("hours","minutes")();
+      writefln(" %s waiting for %s (%s, %2d nodes, %4d cpus) - estimated start in %4d:%02d",j.state,j.reason,j.time,j.nodes,j.ncpus,ts.hours,ts.minutes);
+    }
+
+  writeln("   partition available cores     jobs running      jobs in queue");
   foreach ( p ; allparts ) { 
     writef("%12s ".color(p.color),p.name);
-    writef(" cores: %3d", p.cores/2);
-    for (auto i=0; i<p.nodes.length; i++ ) { writef("."); }
+    writef("           %4d", p.cores/2);
+    auto sum=0;
+    foreach( j ; p.running) sum += alljobs[j].ncpus;
+    writef("  %4d [%3d cores]", p.running.length, sum);
+    sum=0;
+    foreach( j ; p.pending) sum += alljobs[j].ncpus;
+    writef("  %4d [%3d cores]", p.pending.length, sum);
     writef("\n");
  }
   
