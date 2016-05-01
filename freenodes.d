@@ -50,6 +50,7 @@ struct Node {
   string sload;
   float load;
   int[] jobs;
+  bool[string] parts;
 }
 
 struct Part { 
@@ -237,7 +238,9 @@ auto scontrol_jobs_info()
       //j.time=format("%d-%02d:%02d:%02d",s.days,s.hours,s.minutes,s.seconds);
       j.time=dur0;
       
-      j.nodes=matchFirst(l, regex(r" (NumNodes)=([^ ]*)")).captures[2].to!int;
+      auto nodes=matchFirst(l, regex(r" (NumNodes)=([^ ]*)")).captures[2];
+      j.nodes=matchFirst(nodes, regex(r"([0-9]*)")).captures[1].to!int;
+
       j.ncpus=matchFirst(l, regex(r" (NumCPUs)=([^ ]*)")).captures[2].to!int;
       j.cpus_per_task=matchFirst(l, regex(r" (CPUs/Task)=([^ ]*)")).captures[2].to!int;
       auto nl=matchFirst(l, regex(r" (NodeList)=([^ ]*)")).captures[2];
@@ -378,6 +381,9 @@ void main(string[] args)
     if(!(p.name in part_color)) part_color[p.name]=Color.fgCyan;
     //p.color = part_color[p.name]; !!!!! this doesnt work
     allparts[i].color = part_color[p.name];  ///while this is OK
+    foreach ( n ; p.nodes) {
+      allnodes[n].parts[p.name]=true ;
+    }
   }
 
   foreach ( j ; alljobs) 
@@ -394,13 +400,15 @@ void main(string[] args)
   //writeln(alljobs);
   //writeln(allparts);
 
-  writef("node  busy cores  state  load allocated cores in /");
+  writef("node  busy cores  state  load allocated cores in: ");
 
   foreach( p ; allparts) {
-    writef("%s".color(p.color),p.name);
-    writef("/");
+    writef("▐%s".color(p.color),p.name);
+    writef("");
   }
   writeln(" partition");
+
+  int sum_cores=0;
 
   foreach (int i, string node_name; node_array)
     {
@@ -418,6 +426,17 @@ void main(string[] args)
       
       writef("%1s%3s%1s (%2d of %2d) %5s %s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"unknown"),load);
 
+      foreach( p ; allparts) {
+        if(node.parts.get(p.name,false))
+          //writef("█".color(p.color));
+          writef("▌".color(p.color));
+        //writef("◼".color(p.color));
+          //writef("|".color(p.color));
+        else writef("-");
+      }
+
+      sum_cores += node.cores;
+
       auto sum=0;
       int[] map;
       char[] smap;
@@ -429,7 +448,7 @@ void main(string[] args)
 
       //writeln("x",node,node.jobs,"x");
 
-      writef("|");
+      writef(" |");
 
       for(auto k=0; k<node.cores; k++) {map[k]=0; smap[k]=ids[0]; cmap[k]=part_color["free"];}
 
@@ -485,6 +504,7 @@ void main(string[] args)
         }
       writeln("");
     }
+  if(print_mark) writeln("Notes: !-marked nodes are overcommited or busy with job outside the slurm control.");
 
   Job[] running, pending, cancelled;
   foreach (j; alljobs) {
@@ -519,20 +539,42 @@ void main(string[] args)
       writefln(" %s waiting for %s (%s, %2d nodes, %4d cpus) - estimated start in %4d:%02d",j.state,j.reason,j.time,j.nodes,j.ncpus,ts.hours,ts.minutes);
     }
 
-  writeln("   partition available cores     jobs running      jobs in queue");
+  string percent_bar(int total, int part, int N) {
+    int x=0;
+    if (part>0) x=(N*part)/total;
+    string fmt = format("[%%%ds%%%ds] %%3d%%%%",x,N-x);
+    //string output = format(fmt,"█".replicate(x),"▒".replicate(N-x),x);
+    string output = format(fmt,"▌".replicate(x),".".replicate(N-x),(100*part)/total);
+    return(output);
+  }
+
+  int sum_rjobs=0;
+  int sum_rcores=0;
+  int sum_pjobs=0;
+  int sum_pcores=0;
+
+  writeln("    partition  allocation duration   cores  jobs running    [ queue saturation % ]       jobs in queue");
   foreach ( p ; allparts ) { 
-    writef("%12s ".color(p.color),p.name);
-    writef("           %4d", p.cores/2);
+    writef("▌%12s ".color(p.color),p.name);
+    writef(" %-20s   %4d", p.max_time.to!string, p.cores/2);
+
     auto sum=0;
     foreach( j ; p.running) sum += alljobs[j].ncpus;
-    writef("  %4d [%3d cores]", p.running.length, sum);
+    writef("  %3d (%3d cores)", p.running.length, sum);
+    writef(" %s",  percent_bar(p.cores/2,sum,20) );
+    sum_rjobs += p.running.length;
+    sum_rcores += sum;
+
     sum=0;
     foreach( j ; p.pending) sum += alljobs[j].ncpus;
-    writef("  %4d [%3d cores]", p.pending.length, sum);
-    writef("\n");
- }
-  
+    writef("  %3d (%3d cores)", p.pending.length, sum);
+    sum_pjobs += p.pending.length;
+    sum_pcores += sum;
 
-  if(print_mark) writeln("Notes: !-marked nodes are overcommited or busy with job outside the slurm control.");
+    writef("\n");
+  }
+
+  string line=format(" %12s  %-20s   %4d  %3d (%3d cores) %s  %3d (%3d cores)".color(Color.bgBlack).color(Color.fgWhite),"TOTAL","", sum_cores, sum_rjobs, sum_rcores, percent_bar(sum_cores,sum_rcores,20), sum_pjobs, sum_pcores);
+  writeln(line);
 }
 
