@@ -1,9 +1,11 @@
 /**
  * Author: Jaroslav Hron <jaroslav.hron@mff.cuni.cz>
  * Date: May 28, 2015
- * Version: 1.4
+ * Version: 1.5
  * License: use freely for any purpose
  * Copyright: none
+ * Repository: https://github.com/JaroslavHron/freenodes.git
+ * Web: http://cluster.karlin.mff.cuni.cz/freenodes
  **/
 
 /**
@@ -55,6 +57,7 @@ struct Node {
 
 struct Part { 
   string name;
+  int idx;
   Color color;
   bool[string] feature;
   Duration max_time;
@@ -359,7 +362,7 @@ void main(string[] args)
 
   if (helpInformation.helpWanted)
     {
-      defaultGetoptPrinter("List cluster occupation info from SLURM.",
+      defaultGetoptPrinter("List cluster occupation info from SLURM.\nSee http://cluster.karlin.mff.cuni.cz/freenodes for details.",
                            helpInformation.options);
       return;
     }
@@ -377,10 +380,13 @@ void main(string[] args)
   auto alljobs=scontrol_jobs_info();
   auto allparts=scontrol_parts_info();
 
+  auto idx=1;
   foreach ( i, p ; allparts ) { 
     if(!(p.name in part_color)) part_color[p.name]=Color.fgCyan;
     //p.color = part_color[p.name]; !!!!! this doesnt work
     allparts[i].color = part_color[p.name];  ///while this is OK
+    allparts[i].idx = idx;
+    idx+=1;
     foreach ( n ; p.nodes) {
       allnodes[n].parts[p.name]=true ;
     }
@@ -402,11 +408,8 @@ void main(string[] args)
 
   writef("node  busy cores  state  load allocated cores in: ");
 
-  foreach( p ; allparts) {
-    writef("▐%s".color(p.color),p.name);
-    writef("");
-  }
-  writeln(" partition");
+  foreach( p ; allparts) writef("%1d%s ".color(p.color),p.idx,p.name);
+  writeln("partition");
 
   int sum_cores=0;
 
@@ -426,14 +429,17 @@ void main(string[] args)
       
       writef("%1s%3s%1s (%2d of %2d) %5s %s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"unknown"),load);
 
+      auto n=allparts.length;
       foreach( p ; allparts) {
-        if(node.parts.get(p.name,false))
+        if(node.parts.get(p.name,false)) {
           //writef("█".color(p.color));
-          writef("▌".color(p.color));
+          writef("%1d".color(p.color),p.idx);
         //writef("◼".color(p.color));
           //writef("|".color(p.color));
-        else writef("-");
+        n=n-1;
+        }
       }
+      writef(" ".replicate(n));
 
       sum_cores += node.cores;
 
@@ -543,8 +549,8 @@ void main(string[] args)
     int x=0;
     if (part>0) x=(N*part)/total;
     string fmt = format("[%%%ds%%%ds] %%3d%%%%",x,N-x);
-    //string output = format(fmt,"█".replicate(x),"▒".replicate(N-x),x);
-    string output = format(fmt,"▌".replicate(x),".".replicate(N-x),(100*part)/total);
+    //string output = format(fmt,"▌".replicate(x),"▒".replicate(N-x),x);
+    string output = format(fmt,"|".replicate(x),".".replicate(N-x),(100*part)/total);
     return(output);
   }
 
@@ -555,7 +561,7 @@ void main(string[] args)
 
   writeln("    partition  allocation duration   cores  jobs running    [ queue saturation % ]       jobs in queue");
   foreach ( p ; allparts ) { 
-    writef("▌%12s ".color(p.color),p.name);
+    writef("%1d%12s ".color(p.color),p.idx,p.name);
     writef(" %-20s   %4d", p.max_time.to!string, p.cores/2);
 
     auto sum=0;
