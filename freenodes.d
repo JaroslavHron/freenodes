@@ -38,6 +38,7 @@ string color(string text, Color c) {
 
 struct Node { 
   string name;
+  int idx;
   int sockets; 
   int cores_per_socket;
   int threads_per_core;
@@ -51,7 +52,7 @@ struct Node {
   string state;
   string sload;
   float load;
-  int[] jobs;
+  Job[] jobs;
   bool[string] parts;
 }
 
@@ -64,9 +65,9 @@ struct Part {
   string[] nodes;
   int priority;
   int cores;
-  int[] jobs;
-  int[] running;
-  int[] pending;
+  Job[] jobs;
+  Job[] running;
+  Job[] pending;
 }
 
 struct Job { 
@@ -280,6 +281,7 @@ auto scontrol_nodes_info()
     {
       auto n=Node();
       n.name=matchFirst(l, regex(r"(NodeName)=([^ ]*)")).captures[2];;
+      n.idx=matchFirst(n.name, regex(r"r([0-9]*)")).captures[1].to!int;
       n.sockets=matchFirst(l, regex(r"(Sockets)=([^ ]*)")).captures[2].to!int;
       n.cores_per_socket=matchFirst(l, regex(r"(CoresPerSocket)=([^ ]*)")).captures[2].to!int;
       n.threads_per_core=matchFirst(l, regex(r"(ThreadsPerCore)=([^ ]*)")).captures[2].to!int;
@@ -355,11 +357,6 @@ void main(string[] args)
                                 "running|r", "Display the list of running jobs", &display_running,
                                 "pending|p", "Display the list of pending jobs", &display_pending);
 
-  auto nodes=executeShell("nodeattr -s ubuntu-14.04");
-  enforce(nodes.status == 0 , "Failed to call nodeattr utility.",nodes.output);
-
-  auto node_array=nodes.output.split();
-
   if (helpInformation.helpWanted)
     {
       defaultGetoptPrinter("List cluster occupation info from SLURM.\nSee http://cluster.karlin.mff.cuni.cz/freenodes for details.",
@@ -394,10 +391,10 @@ void main(string[] args)
 
   foreach ( j ; alljobs) 
     {
-      foreach( k ; j.allocations ) allnodes[k].jobs ~= j.id ;
-      allparts[j.partition].jobs ~= j.id ;
-      if(j.state=="RUNNING") allparts[j.partition].running ~= j.id;
-      else if(j.state=="PENDING") allparts[j.partition].pending ~= j.id;
+      foreach( k ; j.allocations ) allnodes[k].jobs ~= j ;
+      allparts[j.partition].jobs ~= j ;
+      if(j.state=="RUNNING") allparts[j.partition].running ~= j;
+      else if(j.state=="PENDING") allparts[j.partition].pending ~= j;
     }
 
   bool print_mark=false;
@@ -413,10 +410,27 @@ void main(string[] args)
 
   int sum_cores=0;
 
-  foreach (int i, string node_name; node_array)
+  //auto nodes=executeShell("nodeattr -s ubuntu-14.04");
+  //enforce(nodes.status == 0 , "Failed to call nodeattr utility.",nodes.output);
+  //auto node_array=nodes.output.split();
+
+  Node[] node_array;
+  node_array.length=allnodes.length;
+
+  auto i=0;
+  foreach( nn ; allnodes) {
+    node_array[i]=nn;
+    i++;
+  }
+
+  node_array.sort!((a,b) {return a.idx < b.idx;});
+
+  //writeln(node_array);
+
+  foreach ( nn ; node_array)
     {
 
-      auto node=allnodes[node_name];
+      auto node=nn; //allnodes[nn.name];
       auto load=format("%6s",node.sload);
 
       string mark=" ";
@@ -460,7 +474,7 @@ void main(string[] args)
 
       foreach ( j; node.jobs)
         {
-          auto job=alljobs[j];
+          auto job=j; //alljobs[j];
           //writeln("x",job,"x");
           if(job.state=="RUNNING") {
             for(auto k=0; k<job.cpus[node.name].length ; k+=2) {
@@ -492,7 +506,7 @@ void main(string[] args)
         {
           foreach ( j; node.jobs)
             {
-              auto job=alljobs[j];
+              auto job=j; //alljobs[j];
               if(job.state=="RUNNING") {
               string id="";
               if (display_id) id~=format("%s|",job.id);
@@ -523,7 +537,8 @@ void main(string[] args)
   if (pending.length>0) writefln(" and %d queued pending jobs.", pending.length);
   else writeln(".");
 
-  sort!("a.priority < b.priority")(pending);
+  //sort!("a.priority < b.priority")(pending);
+  pending.sort!("a.start_time < b.start_time");
 
   if (display_running) foreach( j; running)
     {
@@ -559,23 +574,47 @@ void main(string[] args)
   int sum_pjobs=0;
   int sum_pcores=0;
 
-  writeln("    partition  allocation duration   cores  jobs running    [ queue saturation % ]       jobs in queue");
+  writeln("    partition  allocation duration   cores  jobs running    [ queue saturation % ]       jobs in queue    next job to go in hh:mm");
   foreach ( p ; allparts ) { 
     writef("%1d%12s ".color(p.color),p.idx,p.name);
     writef(" %-20s   %4d", p.max_time.to!string, p.cores/2);
 
+    p.pending.sort!("a.start_time < b.start_time");
+
     auto sum=0;
-    foreach( j ; p.running) sum += alljobs[j].ncpus;
+    foreach( j ; p.running) sum += j.ncpus;
     writef("  %3d (%3d cores)", p.running.length, sum);
     writef(" %s",  percent_bar(p.cores/2,sum,20) );
     sum_rjobs += p.running.length;
     sum_rcores += sum;
 
     sum=0;
-    foreach( j ; p.pending) sum += alljobs[j].ncpus;
-    writef("  %3d (%3d cores)", p.pending.length, sum);
+    foreach( j ; p.pending) sum += j.ncpus;
+    writef("  %3d (%3d cores)  ", p.pending.length, sum);
     sum_pjobs += p.pending.length;
     sum_pcores += sum;
+
+    int k=0;
+    foreach ( j; p.pending)
+      {
+        if(k<1) {
+          auto job=j; //alljobs[j];
+          string id="";
+          if (display_id) id~=format("%s|",job.id);
+          if (display_user) id~=format("%s|",job.user);
+          if (display_time) {
+            auto ets=job.start_time-cast(DateTime)(Clock.currTime());
+            auto ts=ets.split!("hours","minutes")();
+            id~=format("%d:%02d|",ts.hours,ts.minutes);
+          }
+          writef("[");
+          writef("%s".color(part_color.get(job.partition,part_color["other"])),id);
+          writef("%d".color(part_color.get(job.partition,part_color["other"])),job.ncpus);
+          writef("]");
+          //write("@",job.priority);
+        }
+        k++;
+      }
 
     writef("\n");
   }
