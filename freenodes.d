@@ -160,7 +160,7 @@ auto scontrol_expand_hosts(string hosts)
 Duration parse_time_interval(string t)
 {
   // parse interval in the form  [days-]hh:mm:ss
-  
+
   auto s=t.split("-");
 
   int ndays=0;
@@ -191,7 +191,7 @@ auto scontrol_parts_info()
       p.name=matchFirst(l, regex(r"(PartitionName)=([^ ]*)")).captures[2];
       p.max_time=parse_time_interval(matchFirst(l, regex(r" (MaxTime)=([^ ]*)")).captures[2]); 
       
-      p.priority=matchFirst(l, regex(r" (Priority)=([^ ]*)")).captures[2].to!int;
+      p.priority=matchFirst(l, regex(r" (Priority|PriorityJobFactor)=([^ ]*)")).captures[2].to!int;
       p.cores=matchFirst(l, regex(r" (TotalCPUs)=([^ ]*)")).captures[2].to!int;
 
       auto nl=matchFirst(l, regex(r" (Nodes)=([^ ]*)")).captures[2];
@@ -301,9 +301,9 @@ auto scontrol_nodes_info()
 }
 
 
-bool display_user=true;
+bool display_user=false;
 bool display_time=true;
-bool display_id=true;
+bool display_id=false;
 bool display_running=false;
 bool display_pending=false;
 
@@ -348,7 +348,7 @@ void main(string[] args)
 {
   part_color=[ "express":Color.fgRed, "short":Color.fgBlue, "long":Color.fgGreen, "biomechanics":Color.fgYellow, "free":Color.none, "debug":Color.fgMagenta, "test":Color.fgMagenta, "other":Color.fgWhite ];
 
-  status_name=[ "ALLOCATED":"full", "IDLE":"free", "MIXED":"part" ];
+  status_name=[ "ALLOCATED":"full", "IDLE":"free", "MIXED":"part", "IDLE+COMPLETING":"wait", "MIXED+COMPLETING":"wait", "ALLOCATED+COMPLETING":"wait", "DOWN*":"down", "DOWN":"down", "DRAINED":"closed", "DRAINING":"closing", "IDLE+DRAIN":"closed", "MIXED+DRAIN":"closed" , "ALLOCATED+DRAIN":"closed" ];
 
   auto helpInformation = getopt(args, std.getopt.config.passThrough, std.getopt.config.bundling,
                                 "id|i", "Display the job id", &display_id,
@@ -441,7 +441,7 @@ void main(string[] args)
       auto net="-";
       if ("InfiniBand" in node.feature) net="=";
       
-      writef("%1s%3s%1s (%2d of %2d) %5s %s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"unknown"),load);
+      writef("%1s%3s%1s (%2d of %2d) %6s %4s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"),load);
 
       auto n=allparts.length;
       foreach( p ; allparts) {
@@ -455,8 +455,10 @@ void main(string[] args)
       }
       writef(" ".replicate(n));
 
+      //string[string] online=["ALLOCATED":"full", "IDLE":"free", "MIXED":"part", "IDLE+COMPLETING":"wait"];        
+      //if (node.state in online ) sum_cores += node.cores;
       sum_cores += node.cores;
-
+      
       auto sum=0;
       int[] map;
       char[] smap;
@@ -537,8 +539,8 @@ void main(string[] args)
   if (pending.length>0) writefln(" and %d queued pending jobs.", pending.length);
   else writeln(".");
 
-  //sort!("a.priority < b.priority")(pending);
-  pending.sort!("a.start_time < b.start_time");
+  pending.sort!("a.priority > b.priority");
+  //pending.sort!("a.start_time < b.start_time");
 
   if (display_running) foreach( j; running)
     {
@@ -562,6 +564,8 @@ void main(string[] args)
 
   string percent_bar(int total, int part, int N) {
     int x=0;
+    //writefln("[%d  %d  %d]",total,part,N);
+    if (part>total) part=total;
     if (part>0) x=(N*part)/total;
     string fmt = format("[%%%ds%%%ds] %%3d%%%%",x,N-x);
     //string output = format(fmt,"▌".replicate(x),"▒".replicate(N-x),x);
@@ -574,15 +578,19 @@ void main(string[] args)
   int sum_pjobs=0;
   int sum_pcores=0;
 
-  writeln("    partition  allocation duration   cores  jobs running    [ queue saturation % ]       jobs in queue    next job to go in hh:mm");
+  writeln("partition  allocation duration   cores  jobs running    [ queue saturation % ]       jobs in queue    next job to go in hh:mm");
   foreach ( p ; allparts ) { 
-    writef("%1d%12s ".color(p.color),p.idx,p.name);
+    writef("%1d%8s ".color(p.color),p.idx,p.name);
     writef(" %-20s   %4d", p.max_time.to!string, p.cores/2);
 
-    p.pending.sort!("a.start_time < b.start_time");
+    //p.pending.sort!("a.start_time < b.start_time");
+    p.pending.sort!("a.priority > b.priority");
 
     auto sum=0;
-    foreach( j ; p.running) sum += j.ncpus;
+    foreach( j ; p.running) {
+      sum += j.tasks/2;
+      //writef("( %d %d)\n",j.ncpus, j.tasks);
+    }
     writef("  %3d (%3d cores)", p.running.length, sum);
     writef(" %s",  percent_bar(p.cores/2,sum,20) );
     sum_rjobs += p.running.length;
@@ -619,7 +627,7 @@ void main(string[] args)
     writef("\n");
   }
 
-  string line=format(" %12s  %-20s   %4d  %3d (%3d cores) %s  %3d (%3d cores)".color(Color.bgBlack).color(Color.fgWhite),"TOTAL","", sum_cores, sum_rjobs, sum_rcores, percent_bar(sum_cores,sum_rcores,20), sum_pjobs, sum_pcores);
+  string line=format(" %8s  %-20s   %4d  %3d (%3d cores) %s  %3d (%3d cores)".color(Color.bgBlack).color(Color.fgWhite),"TOTAL","", sum_cores, sum_rjobs, sum_rcores, percent_bar(sum_cores,sum_rcores,20), sum_pjobs, sum_pcores);
   writeln(line);
 }
 
