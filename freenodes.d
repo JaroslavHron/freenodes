@@ -45,9 +45,12 @@ struct Node {
   int cpus;
   int cpu_alloc;
   int cores;
+  int hd_size;	
   int mem;
   int mem_alloc;
-  string features; 
+  int disk_total;
+  int disk_free;
+string features; 
   bool[string] feature; 
   string state;
   string sload;
@@ -161,6 +164,8 @@ Duration parse_time_interval(string t)
 {
   // parse interval in the form  [days-]hh:mm:ss
 
+  if (t=="INVALID") return(seconds(0));
+
   auto s=t.split("-");
 
   int ndays=0;
@@ -180,8 +185,11 @@ auto scontrol_parts_info()
 {
   auto cmd=format("scontrol -a -o -d show part");
   auto result=executeShell(cmd);
-  enforce( result.status == 0 , "Failed to call scontrol utility.\n"~result.output);
   auto output=result.output.strip().split("\n");
+  if (result.status != 0) {
+    writeln("Failed to call scontrol utility.\n" ~ result.output);
+    output.length=0;
+  }
 
   Part[string] parts;
 
@@ -209,11 +217,15 @@ auto scontrol_jobs_info()
 {
   auto cmd=format("scontrol -a -o -d show job");
   auto result=executeShell(cmd);
-  enforce( result.status == 0 , "Failed to call scontrol utility.\n"~result.output);
   auto output=result.output.strip().split("\n");
+  if (result.status != 0) {
+    writeln("Failed to call scontrol utility.\n" ~ result.output);
+    output.length=0;
+  }
 
   Job[int] jobs;
 
+  if(output.length==0) return(jobs);
   if(!cmp(output[0],"No jobs in the system")) return(jobs);
 
   foreach(int i, string l; output)
@@ -272,15 +284,18 @@ auto scontrol_nodes_info()
 {
   auto cmd=format("scontrol -a -o -d show node");
   auto result=executeShell(cmd);
-  enforce(result.status == 0 , "Failed to call scontrol utility.\n"~result.output);
   auto output=result.output.strip().split("\n");
-
+  if (result.status != 0) {
+    writeln("Failed to call scontrol utility.\n" ~ result.output);
+    output.length=0;
+  }
+  
   Node[string] nodes;
 
   foreach(int i, string l; output)
     {
       auto n=Node();
-      n.name=matchFirst(l, regex(r"(NodeName)=([^ ]*)")).captures[2];;
+      n.name=matchFirst(l, regex(r"(NodeName)=([^ ]*)")).captures[2];
       n.idx=matchFirst(n.name, regex(r"r([0-9]*)")).captures[1].to!int;
       n.sockets=matchFirst(l, regex(r"(Sockets)=([^ ]*)")).captures[2].to!int;
       n.cores_per_socket=matchFirst(l, regex(r"(CoresPerSocket)=([^ ]*)")).captures[2].to!int;
@@ -288,6 +303,7 @@ auto scontrol_nodes_info()
       n.cpus=matchFirst(l, regex(r"(CPUTot)=([^ ]*)")).captures[2].to!int;
       n.mem=matchFirst(l, regex(r"(RealMemory)=([^ ]*)")).captures[2].to!int;
       n.mem_alloc=matchFirst(l, regex(r"(AllocMem)=([^ ]*)")).captures[2].to!int;
+      n.hd_size=matchFirst(l, regex(r"(TmpDisk)=([^ ]*)")).captures[2].to!int;
       n.cpu_alloc=matchFirst(l, regex(r"(CPUAlloc)=([^ ]*)")).captures[2].to!int;
       n.features=matchFirst(l, regex(r"(Features)=([^ ]*)")).captures[2].strip();
       foreach(string f ; n.features.split(",")) n.feature[f]=true;
@@ -297,11 +313,12 @@ auto scontrol_nodes_info()
       n.cores=n.sockets*n.cores_per_socket;
       nodes[n.name]=n;
     }
+  
   return(nodes);
 }
 
 
-bool display_user=false;
+bool display_user=true;
 bool display_time=true;
 bool display_id=false;
 bool display_running=false;
@@ -440,8 +457,10 @@ void main(string[] args)
 
       auto net="-";
       if ("InfiniBand" in node.feature) net="=";
+      auto hd_size=".";
+      if (node.hd_size > 100 ) hd_size=":";
       
-      writef("%1s%3s%1s (%2d of %2d) %6s %4s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"),load);
+      writef("%1s%3s%1s%1s (%2d of %2d) %6s %4s ",mark, node.name, net, hd_size, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"),load);
 
       auto n=allparts.length;
       foreach( p ; allparts) {
@@ -569,7 +588,9 @@ void main(string[] args)
     if (part>0) x=(N*part)/total;
     string fmt = format("[%%%ds%%%ds] %%3d%%%%",x,N-x);
     //string output = format(fmt,"▌".replicate(x),"▒".replicate(N-x),x);
-    string output = format(fmt,"|".replicate(x),".".replicate(N-x),(100*part)/total);
+    int aux=0;
+    if (total>0) aux=(100*part)/total;
+    string output = format(fmt,"|".replicate(x),".".replicate(N-x),aux);
     return(output);
   }
 
