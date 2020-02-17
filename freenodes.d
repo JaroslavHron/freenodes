@@ -45,9 +45,12 @@ struct Node {
   int cpus;
   int cpu_alloc;
   int cores;
+  int hd_size;	
   int mem;
   int mem_alloc;
-  string features; 
+  int disk_total;
+  int disk_free;
+string features; 
   bool[string] feature; 
   string state;
   string sload;
@@ -85,6 +88,7 @@ struct Job {
   string reason;
   int priority;
   int nodes;
+  int ntasks;
   int tasks;
   int cpus_per_task;
   int ncpus;
@@ -161,6 +165,8 @@ Duration parse_time_interval(string t)
 {
   // parse interval in the form  [days-]hh:mm:ss
 
+  if (t=="INVALID") return(seconds(0));
+
   auto s=t.split("-");
 
   int ndays=0;
@@ -180,8 +186,11 @@ auto scontrol_parts_info()
 {
   auto cmd=format("scontrol -a -o -d show part");
   auto result=executeShell(cmd);
-  enforce( result.status == 0 , "Failed to call scontrol utility.\n"~result.output);
   auto output=result.output.strip().split("\n");
+  if (result.status != 0) {
+    writeln("Failed to call scontrol utility.\n" ~ result.output);
+    output.length=0;
+  }
 
   Part[string] parts;
 
@@ -209,11 +218,15 @@ auto scontrol_jobs_info()
 {
   auto cmd=format("scontrol -a -o -d show job");
   auto result=executeShell(cmd);
-  enforce( result.status == 0 , "Failed to call scontrol utility.\n"~result.output);
   auto output=result.output.strip().split("\n");
+  if (result.status != 0) {
+    writeln("Failed to call scontrol utility.\n" ~ result.output);
+    output.length=0;
+  }
 
   Job[int] jobs;
 
+  if(output.length==0) return(jobs);
   if(!cmp(output[0],"No jobs in the system")) return(jobs);
 
   foreach(int i, string l; output)
@@ -246,6 +259,7 @@ auto scontrol_jobs_info()
       j.nodes=matchFirst(nodes, regex(r"([0-9]*)")).captures[1].to!int;
 
       j.ncpus=matchFirst(l, regex(r" (NumCPUs)=([^ ]*)")).captures[2].to!int;
+      j.ntasks=matchFirst(l, regex(r" (NumTasks)=([^ ]*)")).captures[2].to!int;
       j.cpus_per_task=matchFirst(l, regex(r" (CPUs/Task)=([^ ]*)")).captures[2].to!int;
       auto nl=matchFirst(l, regex(r" (NodeList)=([^ ]*)")).captures[2];
       auto nlex=scontrol_expand_hosts(nl);
@@ -272,22 +286,29 @@ auto scontrol_nodes_info()
 {
   auto cmd=format("scontrol -a -o -d show node");
   auto result=executeShell(cmd);
-  enforce(result.status == 0 , "Failed to call scontrol utility.\n"~result.output);
   auto output=result.output.strip().split("\n");
-
+  if (result.status != 0) {
+    writeln("Failed to call scontrol utility.\n" ~ result.output);
+    output.length=0;
+  }
+  
   Node[string] nodes;
 
   foreach(int i, string l; output)
     {
       auto n=Node();
-      n.name=matchFirst(l, regex(r"(NodeName)=([^ ]*)")).captures[2];;
-      n.idx=matchFirst(n.name, regex(r"r([0-9]*)")).captures[1].to!int;
+      n.name=matchFirst(l, regex(r"(NodeName)=([^ ]*)")).captures[2];
+      auto idx=matchFirst(n.name, regex(r"r([0-9]*)")).captures[1].to!int;
+      if (matchFirst(n.name, regex(r"d([0-9]*)")).captures[1].length>0)
+      	 {idx=10*matchFirst(n.name, regex(r"d([0-9]*)")).captures[1].to!int;}
+      n.idx=idx;
       n.sockets=matchFirst(l, regex(r"(Sockets)=([^ ]*)")).captures[2].to!int;
       n.cores_per_socket=matchFirst(l, regex(r"(CoresPerSocket)=([^ ]*)")).captures[2].to!int;
       n.threads_per_core=matchFirst(l, regex(r"(ThreadsPerCore)=([^ ]*)")).captures[2].to!int;
       n.cpus=matchFirst(l, regex(r"(CPUTot)=([^ ]*)")).captures[2].to!int;
       n.mem=matchFirst(l, regex(r"(RealMemory)=([^ ]*)")).captures[2].to!int;
       n.mem_alloc=matchFirst(l, regex(r"(AllocMem)=([^ ]*)")).captures[2].to!int;
+      n.hd_size=matchFirst(l, regex(r"(TmpDisk)=([^ ]*)")).captures[2].to!int;
       n.cpu_alloc=matchFirst(l, regex(r"(CPUAlloc)=([^ ]*)")).captures[2].to!int;
       n.features=matchFirst(l, regex(r"(Features)=([^ ]*)")).captures[2].strip();
       foreach(string f ; n.features.split(",")) n.feature[f]=true;
@@ -297,17 +318,20 @@ auto scontrol_nodes_info()
       n.cores=n.sockets*n.cores_per_socket;
       nodes[n.name]=n;
     }
+  
   return(nodes);
 }
 
 
-bool display_user=false;
+bool display_user=true;
 bool display_time=true;
 bool display_id=false;
 bool display_running=false;
 bool display_pending=false;
 
-string ids=".x#!!!!!!";
+//string ids=".x#!!!!!!";
+//wchar[] ids=['_','\u25FC','#','!','!','!','!','!','!'];
+wchar[] ids=['.','x','#','!','!','!','!','!','!'];
 
 Color[string] part_color;
 string[string] status_name;
@@ -318,7 +342,7 @@ auto create_core_map(Node node, Job job)
   auto sum=0;
   char[] rmap;
   int[] map;
-  char[] smap;
+  wchar[] smap;
   Color[] cmap;
   
   map.length=node.cores;
@@ -403,7 +427,7 @@ void main(string[] args)
   //writeln(alljobs);
   //writeln(allparts);
 
-  writef("node  busy cores  state  load allocated cores in: ");
+  writef(" node↔  HD mem busy cores  state   load allocated cores in: ");
 
   foreach( p ; allparts) writef("%1d%s ".color(p.color),p.idx,p.name);
   writeln("partition");
@@ -438,17 +462,22 @@ void main(string[] args)
       if (node.load>node.threads_per_core*node.cores+0.2) mark="!";
       if (mark!=" ") print_mark=true;
 
-      auto net="-";
-      if ("InfiniBand" in node.feature) net="=";
+      auto net="↔";
+      if ("InfiniBand" in node.feature) net="⇌";
+      if ("InfiniBand100" in node.feature) net="⇄";
+      auto hd_size="o";
+      if (node.hd_size > 0 ) hd_size=".";
+      if (node.hd_size > 100 ) hd_size=":";
       
-      writef("%1s%3s%1s (%2d of %2d) %6s %4s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"),load);
+      //writef("%1s%4s%1s (%2d of %2d) %6s %4s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"),load);
+      writef("%1s%4s%1s %3d %3d (%2d of %2d) %6s %4s ",mark, node.name, net, node.hd_size, node.mem, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"),load);
 
       auto n=allparts.length;
       foreach( p ; allparts) {
         if(node.parts.get(p.name,false)) {
           //writef("█".color(p.color));
           writef("%1d".color(p.color),p.idx);
-        //writef("◼".color(p.color));
+          //writef("\u25FC".color(p.color));
           //writef("|".color(p.color));
         n=n-1;
         }
@@ -461,7 +490,7 @@ void main(string[] args)
       
       auto sum=0;
       int[] map;
-      char[] smap;
+      wchar[] smap;
       Color[] cmap;
 
       map.length=node.cores;
@@ -569,7 +598,9 @@ void main(string[] args)
     if (part>0) x=(N*part)/total;
     string fmt = format("[%%%ds%%%ds] %%3d%%%%",x,N-x);
     //string output = format(fmt,"▌".replicate(x),"▒".replicate(N-x),x);
-    string output = format(fmt,"|".replicate(x),".".replicate(N-x),(100*part)/total);
+    int aux=0;
+    if (total>0) aux=(100*part)/total;
+    string output = format(fmt,"|".replicate(x),".".replicate(N-x),aux);
     return(output);
   }
 
