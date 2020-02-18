@@ -45,12 +45,13 @@ struct Node {
   int cpus;
   int cpu_alloc;
   int cores;
-  int hd_size;	
+  int hd_size;
+  string os;
   int mem;
   int mem_alloc;
   int disk_total;
   int disk_free;
-string features; 
+  string features; 
   bool[string] feature; 
   string state;
   string sload;
@@ -65,6 +66,7 @@ struct Part {
   Color color;
   bool[string] feature;
   Duration max_time;
+  Duration def_time;
   string[] nodes;
   int priority;
   int cores;
@@ -165,7 +167,8 @@ Duration parse_time_interval(string t)
 {
   // parse interval in the form  [days-]hh:mm:ss
 
-  if (t=="INVALID") return(seconds(0));
+  if (t=="INVALID") return(seconds(-1));
+  if (t=="NONE") return(seconds(-1));
 
   auto s=t.split("-");
 
@@ -199,7 +202,7 @@ auto scontrol_parts_info()
       auto p=Part();
       p.name=matchFirst(l, regex(r"(PartitionName)=([^ ]*)")).captures[2];
       p.max_time=parse_time_interval(matchFirst(l, regex(r" (MaxTime)=([^ ]*)")).captures[2]); 
-      
+      p.def_time=parse_time_interval(matchFirst(l, regex(r" (DefaultTime)=([^ ]*)")).captures[2]);
       p.priority=matchFirst(l, regex(r" (Priority|PriorityJobFactor)=([^ ]*)")).captures[2].to!int;
       p.cores=matchFirst(l, regex(r" (TotalCPUs)=([^ ]*)")).captures[2].to!int;
 
@@ -312,10 +315,14 @@ auto scontrol_nodes_info()
       n.cpu_alloc=matchFirst(l, regex(r"(CPUAlloc)=([^ ]*)")).captures[2].to!int;
       n.features=matchFirst(l, regex(r"(Features)=([^ ]*)")).captures[2].strip();
       foreach(string f ; n.features.split(",")) n.feature[f]=true;
-      n.sload=matchFirst(l, regex(r"(CPULoad)=([^ ]*)")).captures[2];
+      n.sload=matchFirst(l, regex(r"(CPULoad)=([^ ]*)")).captures[2].strip();
       try n.load=n.sload.to!float; catch (ConvException) n.load=-1.0;
       n.state=matchFirst(l, regex(r"(State)=([^ ]*)")).captures[2];
       n.cores=n.sockets*n.cores_per_socket;
+      auto os=matchFirst(l, regex(r"(OS)=([^=]*) RealMemory=")).captures[2];
+      auto osid=matchFirst(os, regex(r"\#([0-9]*)")).captures[1].to!int;
+      n.os="u16";
+      if (osid>78) {n.os="u18";}
       nodes[n.name]=n;
     }
   
@@ -326,6 +333,7 @@ auto scontrol_nodes_info()
 bool display_user=true;
 bool display_time=true;
 bool display_id=false;
+bool display_node=false;
 bool display_running=false;
 bool display_pending=false;
 
@@ -376,6 +384,7 @@ void main(string[] args)
 
   auto helpInformation = getopt(args, std.getopt.config.passThrough, std.getopt.config.bundling,
                                 "id|i", "Display the job id", &display_id,
+                                "node|n", "Display the node details", &display_node,
                                 "time|t", "Display the remaining time of the job allocation", &display_time,
                                 "user|u", "Display the user names", &display_user,
                                 "running|r", "Display the list of running jobs", &display_running,
@@ -427,7 +436,12 @@ void main(string[] args)
   //writeln(alljobs);
   //writeln(allparts);
 
-  writef(" node↔  HD mem busy cores  state   load allocated cores in: ");
+  auto mhead=" node↔";
+  if (display_node) mhead ~=" OS mem HD";
+  mhead ~= " busy cores state";
+  if (display_node) mhead ~=" load";
+  mhead ~= " alloc cores in: ";
+  writef(mhead);
 
   foreach( p ; allparts) writef("%1d%s ".color(p.color),p.idx,p.name);
   writeln("partition");
@@ -455,7 +469,6 @@ void main(string[] args)
     {
 
       auto node=nn; //allnodes[nn.name];
-      auto load=format("%6s",node.sload);
 
       string mark=" ";
       if (node.load>0.2 && node.state=="IDLE") mark="!";
@@ -470,7 +483,10 @@ void main(string[] args)
       if (node.hd_size > 100 ) hd_size=":";
       
       //writef("%1s%4s%1s (%2d of %2d) %6s %4s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"),load);
-      writef("%1s%4s%1s %3d %3d (%2d of %2d) %6s %4s ",mark, node.name, net, node.hd_size, node.mem, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"),load);
+      writef("%1s%4s%1s",mark, node.name, net);
+      if (display_node) writef(" %3s %3d %3d", node.os, node.mem, node.hd_size);
+      writef(" (%2d of %2d) %5s ", node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"));
+      if (display_node) writef(" % 3.0f ",node.load);
 
       auto n=allparts.length;
       foreach( p ; allparts) {
@@ -479,10 +495,10 @@ void main(string[] args)
           writef("%1d".color(p.color),p.idx);
           //writef("\u25FC".color(p.color));
           //writef("|".color(p.color));
-        n=n-1;
+        n-=1;
         }
       }
-      writef(" ".replicate(n));
+      writef(" ".replicate(n-2));
 
       //string[string] online=["ALLOCATED":"full", "IDLE":"free", "MIXED":"part", "IDLE+COMPLETING":"wait"];        
       //if (node.state in online ) sum_cores += node.cores;
@@ -541,7 +557,7 @@ void main(string[] args)
               if(job.state=="RUNNING") {
               string id="";
               if (display_id) id~=format("%s|",job.id);
-              if (display_user) id~=format("%s|",job.user);
+              if (display_user) id~=format("%.2s|",job.user);
               if (display_time) {
                 auto ts=job.time.split!("hours","minutes")();
                 id~=format("%d:%02d|",ts.hours,ts.minutes);
@@ -609,10 +625,16 @@ void main(string[] args)
   int sum_pjobs=0;
   int sum_pcores=0;
 
-  writeln("partition  allocation duration   cores  jobs running    [ queue saturation % ]       jobs in queue    next job to go in hh:mm");
+  writeln("partition  allocation duration   cores  jobs running     [ queue  % ]       jobs in queue    next job to go in hh:mm");
   foreach ( p ; allparts ) { 
     writef("%1d%8s ".color(p.color),p.idx,p.name);
-    writef(" %-20s   %4d", p.max_time.to!string, p.cores/2);
+    if (p.def_time.isNegative()) {
+      writef("%-22s ", p.max_time.to!string);
+    }
+    else {
+      writef("%-12s (max %3dh)", p.def_time.to!string, p.max_time.total!"hours");
+    }
+    writef(" %4d", p.cores/2);
 
     //p.pending.sort!("a.start_time < b.start_time");
     p.pending.sort!("a.priority > b.priority");
@@ -622,14 +644,15 @@ void main(string[] args)
       sum += j.tasks/2;
       //writef("( %d %d)\n",j.ncpus, j.tasks);
     }
-    writef("  %3d (%3d cores)", p.running.length, sum);
-    writef(" %s",  percent_bar(p.cores/2,sum,20) );
+    writef("   %3d (%3d cores)", p.running.length, sum);
+    writef(" %s",  percent_bar(p.cores/2,sum,10) );
     sum_rjobs += p.running.length;
     sum_rcores += sum;
 
     sum=0;
     foreach( j ; p.pending) sum += j.ncpus;
     writef("  %3d (%3d cores)  ", p.pending.length, sum);
+    //writef(" %s",  percent_bar(p.cores/2,sum,10) );
     sum_pjobs += p.pending.length;
     sum_pcores += sum;
 
@@ -658,7 +681,7 @@ void main(string[] args)
     writef("\n");
   }
 
-  string line=format(" %8s  %-20s   %4d  %3d (%3d cores) %s  %3d (%3d cores)".color(Color.bgBlack).color(Color.fgWhite),"TOTAL","", sum_cores, sum_rjobs, sum_rcores, percent_bar(sum_cores,sum_rcores,20), sum_pjobs, sum_pcores);
+  string line=format(" %8s  %-20s   %4d   %3d (%3d cores) %s  %3d (%3d cores)".color(Color.bgBlack).color(Color.fgWhite),"TOTAL","", sum_cores, sum_rjobs, sum_rcores, percent_bar(sum_cores,sum_rcores,10), sum_pjobs, sum_pcores);
   writeln(line);
 }
 
