@@ -58,6 +58,7 @@ struct Node {
   float load;
   Job[] jobs;
   bool[string] parts;
+  bool up;
 }
 
 struct Part { 
@@ -378,7 +379,17 @@ auto create_core_map(Node node, Job job)
 
 void main(string[] args)
 {
-  part_color=[ "express":Color.fgRed, "short":Color.fgBlue, "long":Color.fgGreen, "biomechanics":Color.fgYellow, "free":Color.none, "debug":Color.fgMagenta, "test":Color.fgMagenta, "other":Color.fgWhite ];
+  part_color=[
+              "express":Color.fgRed,
+              "express3":Color.fgRed,
+              "short":Color.fgBlue,
+              "long":Color.fgGreen,
+              "parallel":Color.fgCyan,
+              "core36":Color.fgMagenta,
+              "free":Color.none,
+              "debug":Color.fgYellow,
+              "test":Color.fgYellow,
+              "other":Color.none ];
 
   status_name=[ "ALLOCATED":"full", "IDLE":"free", "MIXED":"part", "IDLE+COMPLETING":"wait", "MIXED+COMPLETING":"wait", "ALLOCATED+COMPLETING":"wait", "DOWN*":"down", "DOWN":"down", "DRAINED":"closed", "DRAINING":"closing", "IDLE+DRAIN":"closed", "MIXED+DRAIN":"closed" , "ALLOCATED+DRAIN":"closed" ];
 
@@ -409,6 +420,13 @@ void main(string[] args)
   auto allnodes=scontrol_nodes_info();
   auto alljobs=scontrol_jobs_info();
   auto allparts=scontrol_parts_info();
+
+  foreach ( i, n ; allnodes) 
+    {
+      auto state= status_name.get(n.state,"unknown");
+      allnodes[i].up=true;
+      if (state=="down") allnodes[i].up=false;
+    }
 
   auto idx=1;
   foreach ( i, p ; allparts ) { 
@@ -503,6 +521,8 @@ void main(string[] args)
       //string[string] online=["ALLOCATED":"full", "IDLE":"free", "MIXED":"part", "IDLE+COMPLETING":"wait"];        
       //if (node.state in online ) sum_cores += node.cores;
       sum_cores += node.cores;
+
+      //writef(node.state);
       
       auto sum=0;
       int[] map;
@@ -517,7 +537,12 @@ void main(string[] args)
 
       writef(" |");
 
-      for(auto k=0; k<node.cores; k++) {map[k]=0; smap[k]=ids[0]; cmap[k]=part_color["free"];}
+      for(auto k=0; k<node.cores; k++) {
+        map[k]=0;
+        smap[k]='-';
+        cmap[k]=part_color["other"];
+      }
+      if(node.up) for(auto k=0; k<node.cores; k++) {map[k]=0; smap[k]=ids[0]; cmap[k]=part_color["free"];}
 
       foreach ( j; node.jobs)
         {
@@ -529,11 +554,11 @@ void main(string[] args)
               //if(cpuid>=node.cores) cpuid-=node.cores;
               //writeln(">",k,cpuid,node.cores);
               map[cpuid] +=1 ;
-              if(node.state=="DOWN") {
-                smap[cpuid] = ids[8];
-                cmap[cpuid]=part_color.get(job.partition,part_color["down"]);
-              } else {
+              if(node.up) {
                 smap[cpuid] = ids[map[cpuid]];
+                cmap[cpuid]=part_color.get(job.partition,part_color["other"]);
+              } else {
+                smap[cpuid] = ids[0];
                 cmap[cpuid]=part_color.get(job.partition,part_color["other"]);
               }
               sum+=1;
