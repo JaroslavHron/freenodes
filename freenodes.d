@@ -321,9 +321,12 @@ auto scontrol_nodes_info()
       n.state=matchFirst(l, regex(r"(State)=([^ ]*)")).captures[2];
       n.cores=n.sockets*n.cores_per_socket;
       auto os=matchFirst(l, regex(r"(OS)=([^=]*) RealMemory=")).captures[2];
-      auto osid=matchFirst(os, regex(r"\#([0-9]*)")).captures[1].to!int;
-      n.os="u16";
-      if (osid>78) {n.os="u18";}
+      if( os.empty ) n.os="unkown";
+      else {
+          auto osid=matchFirst(os, regex(r"\#([0-9]*)")).captures[1].to!int;
+          n.os="u16";
+          if (osid>78) n.os="u18";
+          }
       nodes[n.name]=n;
     }
   
@@ -331,7 +334,7 @@ auto scontrol_nodes_info()
 }
 
 
-bool display_user=true;
+bool display_user=false;
 bool display_time=true;
 bool display_id=false;
 bool display_node=false;
