@@ -138,8 +138,9 @@ auto scontrol_expand_hosts(string hosts)
 {
   string[] nh;
 
-  auto pat1=regex(r"r([^ ]*)");
-  auto ls=matchFirst(hosts, pat1).captures[1];
+  auto pat1=regex(r"([a-z])([^ ]*)");
+  auto nn=matchFirst(hosts, pat1).captures[1];
+  auto ls=matchFirst(hosts, pat1).captures[2];
   auto pat2=regex(r"\[([0-9,-]*)\]");
   auto ms=matchFirst(ls.strip(), pat2);
   if (ms) {
@@ -150,15 +151,15 @@ auto scontrol_expand_hosts(string hosts)
         assert(m.length==1||m.length==2);
         if(m.length==2) {
           for(auto i=to!int(m[0]); i<=to!int(m[1]); i++)
-            nh~= "r"~to!string(i);
+            nh~= nn~to!string(i);
         }
         else if(m.length==1) {
-          nh~= "r"~m[0];
+          nh~= nn~m[0];
         }
       }
   }
   else {
-    nh~= "r"~ls;    
+    nh~= nn~ls;    
   }
  
   return(nh);
@@ -189,8 +190,13 @@ Duration parse_time_interval(string t)
 auto scontrol_parts_info()
 {
   auto cmd=format("scontrol -a -o -d show part");
+  scope(failure) {
+      writeln("Failed to call scontrol utility: " ~ cmd);
+  }
+  
   auto result=executeShell(cmd);
   auto output=result.output.strip().split("\n");
+  
   if (result.status != 0) {
     writeln("Failed to call scontrol utility.\n" ~ result.output);
     output.length=0;
@@ -221,6 +227,9 @@ auto scontrol_parts_info()
 auto scontrol_jobs_info()
 {
   auto cmd=format("scontrol -a -o -d show job");
+  scope(failure) {
+      writeln("Failed to call scontrol utility: " ~ cmd);
+  }
   auto result=executeShell(cmd);
   auto output=result.output.strip().split("\n");
   if (result.status != 0) {
@@ -298,13 +307,15 @@ auto scontrol_nodes_info()
   
   Node[string] nodes;
 
+  auto idx=0;
   foreach(int i, string l; output)
     {
       auto n=Node();
+      idx++;
       n.name=matchFirst(l, regex(r"(NodeName)=([^ ]*)")).captures[2];
-      auto idx=matchFirst(n.name, regex(r"r([0-9]*)")).captures[1].to!int;
-      if (matchFirst(n.name, regex(r"d([0-9]*)")).captures[1].length>0)
-      	 {idx=10*matchFirst(n.name, regex(r"d([0-9]*)")).captures[1].to!int;}
+      //auto idx=matchFirst(n.name, regex(r"r([0-9]*)")).captures[1].to!int;
+      //if (matchFirst(n.name, regex(r"d([0-9]*)")).captures[1].length>0)
+      //	 {idx=10*matchFirst(n.name, regex(r"d([0-9]*)")).captures[1].to!int;}
       n.idx=idx;
       n.sockets=matchFirst(l, regex(r"(Sockets)=([^ ]*)")).captures[2].to!int;
       n.cores_per_socket=matchFirst(l, regex(r"(CoresPerSocket)=([^ ]*)")).captures[2].to!int;
@@ -334,7 +345,7 @@ auto scontrol_nodes_info()
 }
 
 
-bool display_user=false;
+bool display_user=true;
 bool display_time=true;
 bool display_id=false;
 bool display_node=false;
