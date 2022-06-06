@@ -138,7 +138,7 @@ auto scontrol_expand_hosts(string hosts)
 {
   string[] nh;
 
-  auto pat1=regex(r"([a-z])([^ ]*)");
+  auto pat1=regex(r"([a-z]*)([^ ]*)");
   auto nn=matchFirst(hosts, pat1).captures[1];
   auto ls=matchFirst(hosts, pat1).captures[2];
   auto pat2=regex(r"\[([0-9,-]*)\]");
@@ -171,6 +171,7 @@ Duration parse_time_interval(string t)
 
   if (t=="INVALID") return(seconds(-1));
   if (t=="NONE") return(seconds(-1));
+  if (t=="UNLIMITED") return(seconds(-1));
 
   auto s=t.split("-");
 
@@ -273,7 +274,7 @@ auto scontrol_jobs_info()
 
       j.ncpus=matchFirst(l, regex(r" (NumCPUs)=([^ ]*)")).captures[2].to!int;
       j.ntasks=matchFirst(l, regex(r" (NumTasks)=([^ ]*)")).captures[2].to!int;
-      j.cpus_per_task=matchFirst(l, regex(r" (CPUs/Task)=([^ ]*)")).captures[2].to!int;
+      j.cpus_per_task=2; //matchFirst(l, regex(r" (CPUs/Task)=([^ ]*)")).captures[2].to!int;
       auto nl=matchFirst(l, regex(r" (NodeList)=([^ ]*)")).captures[2];
       auto nlex=scontrol_expand_hosts(nl);
       
@@ -434,6 +435,10 @@ void main(string[] args)
   auto allnodes=scontrol_nodes_info();
   auto alljobs=scontrol_jobs_info();
   auto allparts=scontrol_parts_info();
+  
+  //writeln(allnodes);
+  //writeln(alljobs);
+  //writeln(allparts);
 
   foreach ( i, n ; allnodes) 
     {
@@ -444,29 +449,31 @@ void main(string[] args)
 
   auto idx=1;
   foreach ( i, p ; allparts ) { 
-    if(!(p.name in part_color)) part_color[p.name]=Color.fgCyan;
+  if(!(p.name in part_color)) part_color[p.name]=Color.fgCyan;
     //p.color = part_color[p.name]; !!!!! this doesnt work
     allparts[i].color = part_color[p.name];  ///while this is OK
     allparts[i].idx = idx;
     idx+=1;
     foreach ( n ; p.nodes) {
-      allnodes[n].parts[p.name]=true ;
+      if(n in allnodes) { 
+       allnodes[n].parts[p.name]=true ;
+       }
     }
   }
 
+  //writeln(allnodes, alljobs);
   foreach ( j ; alljobs) 
     {
-      foreach( k ; j.allocations ) allnodes[k].jobs ~= j ;
+      foreach( k ; j.allocations ) {
+         //writeln(k,j,j.allocations);
+         allnodes[k].jobs ~= j ;
+	}
       allparts[j.partition].jobs ~= j ;
       if(j.state=="RUNNING") allparts[j.partition].running ~= j;
       else if(j.state=="PENDING") allparts[j.partition].pending ~= j;
     }
 
   bool print_mark=false;
-
-  //writeln(allnodes);
-  //writeln(alljobs);
-  //writeln(allparts);
 
   auto mhead=" node↔";
   if (display_node) mhead ~=" OS mem HD";
@@ -515,9 +522,9 @@ void main(string[] args)
       if (node.hd_size > 100 ) hd_size=":";
       
       //writef("%1s%4s%1s (%2d of %2d) %6s %4s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"),load);
-      writef("%1s%4s%1s",mark, node.name, net);
+      writef("%1s%12s%1s",mark, node.name, net);
       if (display_node) writef(" %3s %3d %3d", node.os, node.mem, node.hd_size);
-      writef(" (%2d of %2d) %5s ", node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"));
+      writef(" (%3d of %3d) %5s ", node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"));
       if (display_node) writef(" % 3.0f ",node.load);
 
       auto n=allparts.length;
@@ -666,7 +673,7 @@ void main(string[] args)
 
   writeln("partition  allocation duration   cores  jobs running     [ queue  % ]       jobs in queue    next job to go in hh:mm");
   foreach ( p ; allparts ) { 
-    writef("%1d%8s ".color(p.color),p.idx,p.name);
+    writef("%1d%12s ".color(p.color),p.idx,p.name);
     if (p.def_time.isNegative()) {
       writef("%-22s ", p.max_time.to!string);
     }
