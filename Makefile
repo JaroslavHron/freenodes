@@ -1,6 +1,4 @@
-all: freenodes showqueue
+all: freenodes
 
 freenodes: freenodes.d
-	dmd -O -inline $<
-showqueue: showqueue.d
 	dmd -O -inline $<
