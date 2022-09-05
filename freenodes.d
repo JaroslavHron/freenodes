@@ -38,7 +38,7 @@ string color(string text, Color c) {
 
 struct Node { 
   string name;
-  int idx;
+  uint idx;
   int sockets; 
   int cores_per_socket;
   int threads_per_core;
@@ -63,7 +63,8 @@ struct Node {
 
 struct Part { 
   string name;
-  int idx;
+  uint idx;
+  string[] label;
   Color color;
   bool[string] feature;
   Duration max_time;
@@ -91,9 +92,9 @@ struct Job {
   string reason;
   int priority;
   int nodes;
-  int ntasks;
+  //int ntasks;
   int tasks;
-  int cpus_per_task;
+  //int cpus_per_task;
   int ncpus;
   int[][string] cpus;
   int[string] mem;
@@ -133,36 +134,27 @@ auto scontrol_count_cpuids(string cpuids)
   return(np);
 }
 
-//Nodes=r[23,25-27] or Nodes=r21
+//scontrol show hostnames "r[1-10],fgf-gf[1-3]"
 auto scontrol_expand_hosts(string hosts)
 {
   string[] nh;
 
-  auto pat1=regex(r"([a-z]*)([^ ]*)");
-  auto nn=matchFirst(hosts, pat1).captures[1];
-  auto ls=matchFirst(hosts, pat1).captures[2];
-  auto pat2=regex(r"\[([0-9,-]*)\]");
-  auto ms=matchFirst(ls.strip(), pat2);
-  if (ms) {
-    auto result=ms.captures[1].strip().split(",");
-    foreach(r; result) 
-      {
-        auto m=r.split("-");
-        assert(m.length==1||m.length==2);
-        if(m.length==2) {
-          for(auto i=to!int(m[0]); i<=to!int(m[1]); i++)
-            nh~= nn~to!string(i);
-        }
-        else if(m.length==1) {
-          nh~= nn~m[0];
-        }
-      }
+  auto cmd=format("scontrol show hostnames %s", hosts);
+  scope(failure) {
+      writeln("Failed to call scontrol utility: " ~ cmd);
   }
-  else {
-    nh~= nn~ls;    
+  
+  auto result=executeShell(cmd);
+  auto output=result.output.strip().split("\n");
+  
+  if (result.status != 0) {
+    writeln("Failed to call scontrol utility.\n" ~ result.output);
+    output.length=0;
   }
- 
-  return(nh);
+
+  //writeln(hosts);
+  //writeln(output);
+  return(output);
 }
 
 Duration parse_time_interval(string t)
@@ -205,8 +197,9 @@ auto scontrol_parts_info()
 
   Part[string] parts;
 
-  foreach(int i, string l; output)
+  foreach(i, string l; output)
     {
+      scope(failure) writeln("Failed to parse:" ~ l);
       auto p=Part();
       p.name=matchFirst(l, regex(r"(PartitionName)=([^ ]*)")).captures[2];
       p.max_time=parse_time_interval(matchFirst(l, regex(r" (MaxTime)=([^ ]*)")).captures[2]); 
@@ -243,8 +236,9 @@ auto scontrol_jobs_info()
   if(output.length==0) return(jobs);
   if(!cmp(output[0],"No jobs in the system")) return(jobs);
 
-  foreach(int i, string l; output)
+  foreach(i, string l; output)
     {
+      scope(failure) writeln("Failed to parse:" ~ l);
       auto j=Job();
       j.name=matchFirst(l, regex(r"(Name)=([^ ]*)")).captures[2];
       j.id=matchFirst(l, regex(r"(JobId)=([^ ]*)")).captures[2].to!int;
@@ -255,12 +249,18 @@ auto scontrol_jobs_info()
       j.user=matchFirst(l, regex(r" (Account)=([^ ]*)")).captures[2];
 
       j.run_time=parse_time_interval(matchFirst(l, regex(r" (RunTime)=([^ ]*)")).captures[2]);
-      j.time_limit=parse_time_interval(matchFirst(l, regex(r" (TimeLimit)=([^ ]*)")).captures[2]); 
+
+      try j.time_limit=parse_time_interval(matchFirst(l, regex(r" (TimeLimit)=([^ ]*)")).captures[2]); 
+      catch(TimeException) j.time_limit=days(365);
 
       j.submit_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (SubmitTime)=([^ ]*)")).captures[2]);
       try j.start_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (StartTime)=([^ ]*)")).captures[2]);
       catch(TimeException) j.start_time=j.submit_time;
-      if(j.state=="RUNNING") j.end_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (EndTime)=([^ ]*)")).captures[2]);
+
+      if(j.state=="RUNNING") {
+        try j.end_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (EndTime)=([^ ]*)")).captures[2]);
+	catch(TimeException) j.end_time=j.submit_time;
+	}
       else j.end_time=j.start_time+j.time_limit;
      
       
@@ -273,10 +273,11 @@ auto scontrol_jobs_info()
       j.nodes=matchFirst(nodes, regex(r"([0-9]*)")).captures[1].to!int;
 
       j.ncpus=matchFirst(l, regex(r" (NumCPUs)=([^ ]*)")).captures[2].to!int;
-      j.ntasks=matchFirst(l, regex(r" (NumTasks)=([^ ]*)")).captures[2].to!int;
-      j.cpus_per_task=2; //matchFirst(l, regex(r" (CPUs/Task)=([^ ]*)")).captures[2].to!int;
-      auto nl=matchFirst(l, regex(r" (NodeList)=([^ ]*)")).captures[2];
-      auto nlex=scontrol_expand_hosts(nl);
+      // these next two are sometimes "N/A" not int
+      //j.ntasks=matchFirst(l, regex(r" (NumTasks)=([^ ]*)")).captures[2].to!int;
+      //j.cpus_per_task=matchFirst(l, regex(r" (CPUs/Task)=([^ ]*)")).captures[2].to!int;
+      //auto nl=matchFirst(l, regex(r" (NodeList)=([^ ]*)")).captures[2];
+      //auto nlex=scontrol_expand_hosts(nl);
       
       string[] nl2;
       int np=0;
@@ -309,8 +310,9 @@ auto scontrol_nodes_info()
   Node[string] nodes;
 
   auto idx=0;
-  foreach(int i, string l; output)
+  foreach(i, string l; output)
     {
+      scope(failure) writeln("Failed to parse:" ~ l);
       auto n=Node();
       idx++;
       n.name=matchFirst(l, regex(r"(NodeName)=([^ ]*)")).captures[2];
@@ -333,12 +335,7 @@ auto scontrol_nodes_info()
       n.state=matchFirst(l, regex(r"(State)=([^ ]*)")).captures[2];
       n.cores=n.sockets*n.cores_per_socket;
       auto os=matchFirst(l, regex(r"(OS)=([^=]*) RealMemory=")).captures[2];
-      if( os.empty ) n.os="unkown";
-      else {
-          auto osid=matchFirst(os, regex(r"\#([0-9]*)")).captures[1].to!int;
-          n.os="u16";
-          if (osid>78) n.os="u18";
-          }
+      if( os.empty ) n.os="unkown"; else n.os=os;
       nodes[n.name]=n;
     }
   
@@ -348,6 +345,7 @@ auto scontrol_nodes_info()
 
 bool display_user=true;
 bool display_time=true;
+bool display_jobs=true;
 bool display_id=false;
 bool display_node=false;
 bool display_running=false;
@@ -397,8 +395,11 @@ void main(string[] args)
   part_color=[
               "express":Color.fgRed,
               "express3":Color.fgRed,
+              "ffa":Color.fgRed,
+              "ffa-preempt":Color.fgRed,
               "short":Color.fgBlue,
               "long":Color.fgGreen,
+              "checkpoint":Color.fgGreen,
               "parallel":Color.fgCyan,
               "core36":Color.fgMagenta,
               "free":Color.none,
@@ -410,6 +411,7 @@ void main(string[] args)
 
   auto helpInformation = getopt(args, std.getopt.config.passThrough, std.getopt.config.bundling,
                                 "id|i", "Display the job id", &display_id,
+				"jobs|j", "Display running jobs info", &display_jobs,
                                 "node|n", "Display the node details", &display_node,
                                 "time|t", "Display the remaining time of the job allocation", &display_time,
                                 "user|u", "Display the user names", &display_user,
@@ -423,6 +425,8 @@ void main(string[] args)
       return;
     }
 
+  if(!display_jobs) {display_user=false; display_id=false; display_time=false;}
+  
   auto head="";
   if(display_user||display_time||display_id) {
     head=" [";
@@ -482,7 +486,7 @@ void main(string[] args)
   mhead ~= " alloc cores in: ";
   writef(mhead);
 
-  foreach( p ; allparts) writef("%1d%s ".color(p.color),p.idx,p.name);
+  foreach( p ; allparts) writef("%1s%s ".color(p.color),toChars!(16, char, LetterCase.upper)(p.idx),p.name);
   writeln("partition");
 
   int sum_cores=0;
@@ -528,10 +532,11 @@ void main(string[] args)
       if (display_node) writef(" % 3.0f ",node.load);
 
       auto n=allparts.length;
+        //writeln(node.parts);
       foreach( p ; allparts) {
-        if(node.parts.get(p.name,false)) {
+      	if(node.parts.get(p.name,false)) {
           //writef("█".color(p.color));
-          writef("%1d".color(p.color),p.idx);
+          writef("%1s".color(p.color),toChars!(16, char, LetterCase.upper)(p.idx));
           //writef("\u25FC".color(p.color));
           //writef("|".color(p.color));
         n-=1;
@@ -673,7 +678,7 @@ void main(string[] args)
 
   writeln("partition  allocation duration   cores  jobs running     [ queue  % ]       jobs in queue    next job to go in hh:mm");
   foreach ( p ; allparts ) { 
-    writef("%1d%12s ".color(p.color),p.idx,p.name);
+    writef("%1s%12s ".color(p.color),toChars!(16, char, LetterCase.upper)(p.idx),p.name);
     if (p.def_time.isNegative()) {
       writef("%-22s ", p.max_time.to!string);
     }
