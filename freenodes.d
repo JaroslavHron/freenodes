@@ -1,11 +1,10 @@
 /**
  * Author: Jaroslav Hron <jaroslav.hron@mff.cuni.cz>
- * Date: May 28, 2015
- * Version: 1.5
+ * Date: May 9, 2026
+ * Version: 2.0
  * License: use freely for any purpose
  * Copyright: none
  * Repository: https://github.com/JaroslavHron/freenodes.git
- * Web: http://cluster.karlin.mff.cuni.cz/freenodes
  **/
 
 /**
@@ -22,7 +21,7 @@ import std.regex;
 import std.exception;
 import std.algorithm;
 import std.datetime;
-//import core.time;
+import std.typecons : tuple;
 
 // color support
 enum Color : int {
@@ -36,9 +35,15 @@ string color(string text, Color c) {
   else return text;
 }
 
-struct Node { 
-  string name;
+struct Cluster {
   uint idx;
+  string name;
+}
+  
+struct Node { 
+  uint idx;
+  string name;
+  string[string] info;
   int sockets; 
   int cores_per_socket;
   int threads_per_core;
@@ -57,20 +62,22 @@ struct Node {
   string sload;
   float load;
   Job[] jobs;
-  bool[string] parts;
+  string[] parts;
   bool up;
 }
 
 struct Part { 
-  string name;
   uint idx;
-  string[] label;
+  string name;
+  string[string] info;
+  char label;
   Color color;
   bool[string] feature;
   Duration max_time;
   Duration def_time;
   string[] nodes;
-  int priority;
+  ulong priority;
+  int cpus;
   int cores;
   Job[] jobs;
   Job[] running;
@@ -78,9 +85,12 @@ struct Part {
 }
 
 struct Job { 
-  int id;
+  uint idx;
   string name;
+  int id;
+  string[string] info;
   string partition;
+  string account;
   string user;
   DateTime submit_time;
   DateTime start_time;
@@ -90,15 +100,53 @@ struct Job {
   Duration time;
   string state;
   string reason;
-  int priority;
+  ulong priority;
   int nodes;
-  //int ntasks;
+  string[] node_list;
   int tasks;
-  //int cpus_per_task;
   int ncpus;
   int[][string] cpus;
+  int[string] cores;
   int[string] mem;
-  string[] allocations;
+}
+
+
+import std.string : toStringz, fromStringz;
+
+extern (C) {
+  // We treat bitstr_t as an opaque struct in D
+  struct bitstr_t;
+
+  // Core bitstring functions from Slurm
+  bitstr_t* slurm_bit_alloc(int nbits);
+  void slurm_bit_free(bitstr_t* b);
+  int slurm_bit_unfmt(bitstr_t* b, const(char)* str);
+  int slurm_bit_ffs(bitstr_t* b);
+  int slurm_bit_size(bitstr_t* b);
+  int slurm_bit_test(bitstr_t* b, int bit);
+}
+
+// not working
+void slurm_expand_cpuids(string cpuids, int ncpus) {
+
+  bitstr_t* myBitmap = slurm_bit_alloc(ncpus);
+  if (!myBitmap) return;
+  scope(exit) slurm_bit_free(myBitmap); // Ensure memory is freed
+
+  if (slurm_bit_unfmt(myBitmap, cpuids.toStringz) != 0) {
+    writeln("Error: Could not parse CPU string.");
+    return;
+  }
+
+  // Instead of bit_next_set, we iterate the whole size of the bitmap
+  int size = slurm_bit_size(myBitmap);
+  writeln("Expanded IDs:", size);
+  foreach (i; 0 .. size) {
+    if (slurm_bit_test(myBitmap, i)) {
+      write(i," ");
+    }
+    //writeln(i, " ", slurm_bit_test(myBitmap, i));
+  }
 }
 
 auto scontrol_expand_cpuids(string cpuids)
@@ -120,46 +168,39 @@ auto scontrol_expand_cpuids(string cpuids)
   return(np);
 }
 
-auto scontrol_count_cpuids(string cpuids)
-{
-  int np=0;
-  auto result=cpuids.strip().split(",");
-  foreach(r; result) 
-    {
-      auto m=r.split("-");
-      assert(m.length==1||m.length==2);
-      if(m.length==2) np+=1+to!int(m[1])-to!int(m[0]); 
-      if(m.length==1) np+=1;
-    }
-  return(np);
+
+// use slurm internal functions to expand ranges
+// Link with -lslurm
+extern(C) {
+    // Represents a Slurm hostlist object
+    alias hostlist_t = void*;
+    // Creates a hostlist from a Slurm node string (e.g., "node[01-03,05]")
+    hostlist_t slurm_hostlist_create(const char* hostlist);
+    // Pops the next hostname from the list (returns NULL when empty)
+    char* slurm_hostlist_shift(hostlist_t hl);
+    // Frees the hostlist object memory
+    void slurm_hostlist_destroy(hostlist_t hl);
+    // Frees strings returned by hostlist_shift (Slurm uses xfree internally)
+    void free(void* ptr); 
 }
 
-//scontrol show hostnames "r[1-10],fgf-gf[1-3]"
-auto scontrol_expand_hosts(string hosts)
+auto slurm_expand_hosts(string hosts)
 {
-  string[] nh;
+    hostlist_t hl = slurm_hostlist_create(hosts.toStringz);
+    scope(exit) slurm_hostlist_destroy(hl);
 
-  auto cmd=format("scontrol show hostnames %s", hosts);
-  scope(failure) {
-      writeln("Failed to call scontrol utility: " ~ cmd);
-  }
-  
-  auto result=executeShell(cmd);
-  auto output=result.output.strip().split("\n");
-  
-  if (result.status != 0) {
-    writeln("Failed to call scontrol utility.\n" ~ result.output);
-    output.length=0;
-  }
-
-  //writeln(hosts);
-  //writeln(output);
+    string[] output;
+    char* name;
+    while ((name = slurm_hostlist_shift(hl)) != null) {
+        output ~= name.fromStringz.idup;
+        free(name); // Critical: shift allocates a new string each time
+    }
   return(output);
 }
 
+// parse interval in the form  [days-]hh:mm:ss
 Duration parse_time_interval(string t)
 {
-  // parse interval in the form  [days-]hh:mm:ss
 
   if (t=="INVALID") return(seconds(-1));
   if (t=="NONE") return(seconds(-1));
@@ -179,10 +220,42 @@ Duration parse_time_interval(string t)
   return(dur);
 }
 
+// get list of available clusters by `sacctmgr list clusters`
+auto slurm_clusters_info()
+{
+  auto cmd=format("sacctmgr -p -n list clusters");
+  scope(failure) {
+      writeln("Failed to call sacctmgr utility: " ~ cmd);
+  }
 
+  auto result=executeShell(cmd);
+  auto output=result.output.strip().split("\n");
+
+  if (result.status != 0) {
+    writeln("Failed to call scontrol utility.\n" ~ result.output);
+    output.length=0;
+  }
+
+  Cluster[string] clusters;
+
+  auto clreg = ctRegex!r"([^|]*)|";
+  foreach(i, string l; output)
+    {
+      scope(failure) writeln("Failed to parse:" ~ l);
+
+      auto c=Cluster();
+      c.idx=cast(uint) i;
+      c.name=matchFirst(l, clreg).captures[1];
+      clusters[c.name]=c;
+    }
+  return(clusters);
+
+}
+
+// fill the Part structure from the `scontrol -a -o -d show part`
 auto scontrol_parts_info()
 {
-  auto cmd=format("scontrol -a -o -d show part");
+  auto cmd=format("scontrol -a -o -d -M %s show part",active_cluster);
   scope(failure) {
       writeln("Failed to call scontrol utility: " ~ cmd);
   }
@@ -200,19 +273,27 @@ auto scontrol_parts_info()
   foreach(i, string l; output)
     {
       scope(failure) writeln("Failed to parse:" ~ l);
+
+      auto slurmReg = ctRegex!r"(?P<var>[^ =]+)=(?P<value>[^ ]+)";
+      auto cx = matchAll(l, slurmReg)
+        .map!(t => tuple(t["var"], t["value"]))
+        .array;
+
+      auto aa = assocArray(cx);
+      aa.rehash;
+      
       auto p=Part();
-      p.name=matchFirst(l, regex(r"(PartitionName)=([^ ]*)")).captures[2];
-      p.max_time=parse_time_interval(matchFirst(l, regex(r" (MaxTime)=([^ ]*)")).captures[2]); 
-      p.def_time=parse_time_interval(matchFirst(l, regex(r" (DefaultTime)=([^ ]*)")).captures[2]);
-      p.priority=matchFirst(l, regex(r" (Priority|PriorityJobFactor)=([^ ]*)")).captures[2].to!int;
-      p.cores=matchFirst(l, regex(r" (TotalCPUs)=([^ ]*)")).captures[2].to!int;
+      p.name=aa["PartitionName"];
+      p.info=aa;
+      p.max_time=parse_time_interval(aa["MaxTime"]); 
+      p.def_time=parse_time_interval(aa["DefaultTime"]);
+      p.priority=aa.get("Priority", "0").to!ulong;
+      p.cpus=aa["TotalCPUs"].to!int;
 
-      auto nl=matchFirst(l, regex(r" (Nodes)=([^ ]*)")).captures[2];
-      auto nlex=scontrol_expand_hosts(nl);
-
+      auto nlex=slurm_expand_hosts(aa["Nodes"]);
       p.nodes=nlex;
       p.color=Color.none;
-
+      
       parts[p.name]=p;
     }
   return(parts);
@@ -220,10 +301,11 @@ auto scontrol_parts_info()
 
 auto scontrol_jobs_info()
 {
-  auto cmd=format("scontrol -a -o -d show job");
+  auto cmd=format("scontrol -a -o -d -M %s show job", active_cluster);
   scope(failure) {
       writeln("Failed to call scontrol utility: " ~ cmd);
   }
+
   auto result=executeShell(cmd);
   auto output=result.output.strip().split("\n");
   if (result.status != 0) {
@@ -236,62 +318,74 @@ auto scontrol_jobs_info()
   if(output.length==0) return(jobs);
   if(!cmp(output[0],"No jobs in the system")) return(jobs);
 
+  auto slurmReg = ctRegex!r"(?P<var>[^ =]+)=(?P<value>[^ ]+)";
+ 
   foreach(i, string l; output)
     {
-      scope(failure) writeln("Failed to parse:" ~ l);
       auto j=Job();
-      j.name=matchFirst(l, regex(r"(Name)=([^ ]*)")).captures[2];
-      j.id=matchFirst(l, regex(r"(JobId)=([^ ]*)")).captures[2].to!int;
-      j.priority=matchFirst(l, regex(r"(Priority)=([^ ]*)")).captures[2].to!int;
-      j.state=matchFirst(l, regex(r" (JobState)=([^ ]*)")).captures[2];
-      j.reason=matchFirst(l, regex(r" (Reason)=([^ ]*)")).captures[2];
-      j.partition=matchFirst(l, regex(r" (Partition)=([^ ]*)")).captures[2];
-      j.user=matchFirst(l, regex(r" (Account)=([^ ]*)")).captures[2];
+      scope(failure) {writeln("Failed to parse:" ~ l); writeln(j);}
 
-      j.run_time=parse_time_interval(matchFirst(l, regex(r" (RunTime)=([^ ]*)")).captures[2]);
+      auto cx = matchAll(l, slurmReg)
+        .map!(t => tuple(t["var"], t["value"]))
+        .array;
 
-      try j.time_limit=parse_time_interval(matchFirst(l, regex(r" (TimeLimit)=([^ ]*)")).captures[2]); 
+      //writeln(cx);
+      auto aa = assocArray(cx);
+      aa.rehash;
+      //writeln(aa);
+      j.info=aa;
+      
+      j.name=aa["JobName"];
+      j.id=aa["JobId"].to!int;
+      j.priority=aa["Priority"].to!ulong;
+      j.state=aa["JobState"];
+      j.reason=aa["Reason"];
+      j.partition=aa["Partition"];
+      j.account=aa["Account"];
+      j.user=aa["UserId"].split("(")[0];
+  
+      j.run_time=parse_time_interval(aa["RunTime"]);
+
+      try j.time_limit=parse_time_interval(aa["TimeLimit"]); 
       catch(TimeException) j.time_limit=days(365);
 
-      j.submit_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (SubmitTime)=([^ ]*)")).captures[2]);
-      try j.start_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (StartTime)=([^ ]*)")).captures[2]);
+      j.submit_time=DateTime.fromISOExtString(aa["SubmitTime"]);
+      try j.start_time=DateTime.fromISOExtString(aa["StartTime"]);
       catch(TimeException) j.start_time=j.submit_time;
-
-      if(j.state=="RUNNING") {
-        try j.end_time=DateTime.fromISOExtString(matchFirst(l, regex(r" (EndTime)=([^ ]*)")).captures[2]);
-	catch(TimeException) j.end_time=j.submit_time;
-	}
-      else j.end_time=j.start_time+j.time_limit;
-     
       
-      auto dur0=j.time_limit-j.run_time;
-      //auto s = dur0.split!("days", "hours", "minutes", "seconds")();
-      //j.time=format("%d-%02d:%02d:%02d",s.days,s.hours,s.minutes,s.seconds);
-      j.time=dur0;
-      
-      auto nodes=matchFirst(l, regex(r" (NumNodes)=([^ ]*)")).captures[2];
-      j.nodes=matchFirst(nodes, regex(r"([0-9]*)")).captures[1].to!int;
-
-      j.ncpus=matchFirst(l, regex(r" (NumCPUs)=([^ ]*)")).captures[2].to!int;
-      // these next two are sometimes "N/A" not int
-      //j.ntasks=matchFirst(l, regex(r" (NumTasks)=([^ ]*)")).captures[2].to!int;
-      //j.cpus_per_task=matchFirst(l, regex(r" (CPUs/Task)=([^ ]*)")).captures[2].to!int;
-      //auto nl=matchFirst(l, regex(r" (NodeList)=([^ ]*)")).captures[2];
-      //auto nlex=scontrol_expand_hosts(nl);
-      
-      string[] nl2;
+      j.nodes=aa["NumNodes"].split("-")[0].to!int;
+      j.ncpus=aa["NumCPUs"].split("-")[0].to!int;
       int np=0;
 
-      foreach(c; matchAll(l, regex(r" (Nodes)=([^ ]*) (CPU_IDs)=([^ ]*) (Mem)=([^ ])"))) {
-        auto tmpn=scontrol_expand_hosts(c.captures[2]);
-        auto tmpnp=scontrol_expand_cpuids(c.captures[4]);
-        auto mem=c.captures[6].to!int;
-        foreach(k;tmpn) {np+=tmpnp.length; j.cpus[k]=tmpnp; j.mem[k]=mem;}
-        nl2 ~= tmpn;
+      if(j.state=="RUNNING") {
+	try j.end_time=DateTime.fromISOExtString(aa["EndTime"]);
+	catch(TimeException) j.end_time=DateTime(3000, 1, 1,0,0,0);
+	
+	//writeln(aa["NodeList"]);
+	//writeln(cx.filter!(t => t[0] == "Nodes"));
+	j.node_list=slurm_expand_hosts(aa["NodeList"]);
+	auto nN = cx.filter!(t => t[0] == "Nodes").array;
+	auto nC = cx.filter!(t => t[0] == "CPU_IDs").array;
+	auto nM = cx.filter!(t => t[0] == "Mem").array;
+	
+	for(auto o=0; o<nN.length; o++)  
+	  {
+	    auto tmpn=slurm_expand_hosts(nN[o][1]);
+	    auto tmpnp=scontrol_expand_cpuids(nC[o][1]);
+	    auto mem=nM[o][1].to!int;
+	    foreach(k;tmpn) {
+	      np+=tmpnp.length;
+	      j.cpus[k]=tmpnp;
+	      j.mem[k]=mem;
+	    }
+	  }
+	//writeln(j.node_list);
+	//writeln(j.cpus);
+
       }
       j.tasks=np;
-      j.allocations=nl2;
-
+      j.time=j.time_limit-j.run_time;
+      
       jobs[j.id]=j;
     }
   return(jobs);
@@ -299,7 +393,7 @@ auto scontrol_jobs_info()
 
 auto scontrol_nodes_info()
 {
-  auto cmd=format("scontrol -a -o -d show node");
+  auto cmd=format("scontrol -a -o -d -M %s show node", active_cluster);
   auto result=executeShell(cmd);
   auto output=result.output.strip().split("\n");
   if (result.status != 0) {
@@ -315,27 +409,33 @@ auto scontrol_nodes_info()
       scope(failure) writeln("Failed to parse:" ~ l);
       auto n=Node();
       idx++;
-      n.name=matchFirst(l, regex(r"(NodeName)=([^ ]*)")).captures[2];
-      //auto idx=matchFirst(n.name, regex(r"r([0-9]*)")).captures[1].to!int;
-      //if (matchFirst(n.name, regex(r"d([0-9]*)")).captures[1].length>0)
-      //	 {idx=10*matchFirst(n.name, regex(r"d([0-9]*)")).captures[1].to!int;}
+
+      auto slurmReg = ctRegex!r"(?P<var>[^ =]+)=(?P<value>[^ ]+)";
+      auto cx = matchAll(l, slurmReg)
+        .map!(t => tuple(t["var"], t["value"]))
+        .array;
+
+      auto aa = assocArray(cx);
+      aa.rehash;
+      
+      n.name=aa["NodeName"];
       n.idx=idx;
-      n.sockets=matchFirst(l, regex(r"(Sockets)=([^ ]*)")).captures[2].to!int;
-      n.cores_per_socket=matchFirst(l, regex(r"(CoresPerSocket)=([^ ]*)")).captures[2].to!int;
-      n.threads_per_core=matchFirst(l, regex(r"(ThreadsPerCore)=([^ ]*)")).captures[2].to!int;
-      n.cpus=matchFirst(l, regex(r"(CPUTot)=([^ ]*)")).captures[2].to!int;
-      n.mem=matchFirst(l, regex(r"(RealMemory)=([^ ]*)")).captures[2].to!int;
-      n.mem_alloc=matchFirst(l, regex(r"(AllocMem)=([^ ]*)")).captures[2].to!int;
-      n.hd_size=matchFirst(l, regex(r"(TmpDisk)=([^ ]*)")).captures[2].to!int;
-      n.cpu_alloc=matchFirst(l, regex(r"(CPUAlloc)=([^ ]*)")).captures[2].to!int;
-      n.features=matchFirst(l, regex(r"(Features)=([^ ]*)")).captures[2].strip();
+      n.info=aa;
+      n.sockets=aa["Sockets"].to!int;
+      n.cores_per_socket=aa["CoresPerSocket"].to!int;
+      n.threads_per_core=aa["ThreadsPerCore"].to!int;
+      n.cpus=aa["CPUTot"].to!int;
+      n.mem=aa["RealMemory"].to!int;
+      n.mem_alloc=aa["AllocMem"].to!int;
+      n.hd_size=aa["TmpDisk"].to!int;
+      n.cpu_alloc=aa["CPUAlloc"].to!int;
+      n.features=aa["AvailableFeatures"].strip();
       foreach(string f ; n.features.split(",")) n.feature[f]=true;
-      n.sload=matchFirst(l, regex(r"(CPULoad)=([^ ]*)")).captures[2].strip();
+      n.sload=aa["CPULoad"].strip();
       try n.load=n.sload.to!float; catch (ConvException) n.load=-1.0;
-      n.state=matchFirst(l, regex(r"(State)=([^ ]*)")).captures[2];
+      n.state=aa["State"].split("+")[0];
       n.cores=n.sockets*n.cores_per_socket;
-      auto os=matchFirst(l, regex(r"(OS)=([^=]*) RealMemory=")).captures[2];
-      if( os.empty ) n.os="unkown"; else n.os=os;
+      n.os=aa.get("OS", "unkown");
       nodes[n.name]=n;
     }
   
@@ -343,80 +443,45 @@ auto scontrol_nodes_info()
 }
 
 
+wchar[] ids=['.','+','#','!','!','!','!','!','!'];
+string charset = "0123456789" ~ "ABCDEFGHIJKLMNOPQRSTUVWXYZ" ~ "abcdefghijklmnopqrstuvwxyz" ~ "!@#$%"; 
+
+Color[string] part_color;
+string[string] status_name;
+
 bool display_user=true;
-bool display_time=true;
+bool display_time=false;
 bool display_jobs=true;
 bool display_id=false;
 bool display_node=false;
 bool display_running=false;
 bool display_pending=false;
+bool list_clusters=false;
+string active_cluster="";
+string partition_select="";
 
-//string ids=".x#!!!!!!";
-//wchar[] ids=['_','\u25FC','#','!','!','!','!','!','!'];
-wchar[] ids=['.','x','#','!','!','!','!','!','!'];
-
-Color[string] part_color;
-string[string] status_name;
-
-
-auto create_core_map(Node node, Job job)
-{
-  auto sum=0;
-  char[] rmap;
-  int[] map;
-  wchar[] smap;
-  Color[] cmap;
-  
-  map.length=node.cores;
-  smap.length=node.cores;
-  cmap.length=node.cores;
-  rmap~=format("%s|",node.name);
-  
-  for(auto k=0; k<node.cores; k++) {map[k]=0; smap[k]=ids[0]; cmap[k]=part_color["free"];}
-  
-  if(job.state=="RUNNING") {
-    for(auto k=0; k<job.cpus[node.name].length ; k++) {
-      auto cpuid=job.cpus[node.name][k];
-      map[cpuid] +=1 ;
-      smap[cpuid] = ids[map[cpuid]];
-      cmap[cpuid]=part_color.get(job.partition,part_color["other"]);
-      sum+=1;
-    }
-  }
-  
-  for( auto k=0; k<node.cores; k++) rmap~=format("%s".color(cmap[k]),smap[k]);
-  
-  rmap~=format("|");
-  return(rmap);
-}
 
 void main(string[] args)
 {
-  part_color=[
-              "express":Color.fgRed,
-              "express3":Color.fgRed,
-              "ffa":Color.fgRed,
-              "ffa-preempt":Color.fgRed,
-              "short":Color.fgBlue,
-              "long":Color.fgGreen,
-              "checkpoint":Color.fgGreen,
-              "parallel":Color.fgCyan,
-              "core36":Color.fgMagenta,
-              "free":Color.none,
-              "debug":Color.fgYellow,
-              "test":Color.fgYellow,
-              "other":Color.none ];
-
-  status_name=[ "ALLOCATED":"full", "IDLE":"free", "MIXED":"part", "IDLE+COMPLETING":"wait", "MIXED+COMPLETING":"wait", "ALLOCATED+COMPLETING":"wait", "DOWN*":"down", "DOWN":"down", "DRAINED":"closed", "DRAINING":"closing", "IDLE+DRAIN":"closed", "MIXED+DRAIN":"closed" , "ALLOCATED+DRAIN":"closed" ];
-
-  auto helpInformation = getopt(args, std.getopt.config.passThrough, std.getopt.config.bundling,
+  
+  status_name=[
+	       "ALLOCATED":"full",
+	       "IDLE":"free",
+	       "MIXED":"part",
+	       "DOWN":"down",
+	       ];
+  
+ auto helpInformation = getopt(args, std.getopt.config.passThrough, std.getopt.config.bundling,
+				"cluster|c", "Select the cluster", &active_cluster,
+				"list_clusters|l", "List available clusters", &list_clusters,
                                 "id|i", "Display the job id", &display_id,
 				"jobs|j", "Display running jobs info", &display_jobs,
                                 "node|n", "Display the node details", &display_node,
                                 "time|t", "Display the remaining time of the job allocation", &display_time,
                                 "user|u", "Display the user names", &display_user,
-                                "running|r", "Display the list of running jobs", &display_running,
-                                "pending|p", "Display the list of pending jobs", &display_pending);
+                                "partition|p", "Display given partition only", &partition_select,
+                                "running|R", "Display the list of running jobs", &display_running,
+                                "pending|P", "Display the list of pending jobs", &display_pending);
 
   if (helpInformation.helpWanted)
     {
@@ -424,6 +489,13 @@ void main(string[] args)
                            helpInformation.options);
       return;
     }
+  
+  auto allclusters=slurm_clusters_info();
+  if (list_clusters) {writeln(allclusters); return;}
+  if ( active_cluster== "")
+    active_cluster = allclusters.byValue.find!(c => c.idx == 0).front.name;
+  writeln("Cluster: "~active_cluster);
+  
 
   if(!display_jobs) {display_user=false; display_id=false; display_time=false;}
   
@@ -433,7 +505,7 @@ void main(string[] args)
     if(display_id)   head~="ID|";
     if(display_user) head~="owner|";
     if(display_time) head~="remaining time|";
-    head~="cores]";
+    head~="cpus]";
   }
 
   auto allnodes=scontrol_nodes_info();
@@ -444,32 +516,45 @@ void main(string[] args)
   //writeln(alljobs);
   //writeln(allparts);
 
-  foreach ( i, n ; allnodes) 
+  foreach ( ref n ; allnodes) 
     {
-      auto state= status_name.get(n.state,"unknown");
-      allnodes[i].up=true;
-      if (state=="down") allnodes[i].up=false;
+      auto state = status_name.get(n.state,"unknown");
+      n.up = true;
+      if (state=="down") n.up=false;
     }
+
+  part_color=[
+	      "edu":Color.fgYellow,
+	      "rse":Color.fgYellow,
+	      "debug":Color.fgYellow,
+              "test":Color.fgYellow,
+              "math":Color.fgBlue,
+              "other":Color.none
+	      ];
 
   auto idx=1;
-  foreach ( i, p ; allparts ) { 
-  if(!(p.name in part_color)) part_color[p.name]=Color.fgCyan;
-    //p.color = part_color[p.name]; !!!!! this doesnt work
-    allparts[i].color = part_color[p.name];  ///while this is OK
-    allparts[i].idx = idx;
+  foreach ( ref p ; allparts ) {
+    if(p.name.canFind("gpu")) part_color[p.name]=Color.fgMagenta;
+    if(p.name.canFind("ffa")) part_color[p.name]=Color.fgRed;
+    if(!(p.name in part_color)) part_color[p.name]=Color.fgCyan;
+    p.color = part_color[p.name];
+    p.idx = idx;
+    p.label= charset[idx]; 
     idx+=1;
+    p.cores=0;
     foreach ( n ; p.nodes) {
       if(n in allnodes) { 
-       allnodes[n].parts[p.name]=true ;
-       }
+	allnodes[n].parts ~= p.name ;
+	p.cores += allnodes[n].cores;
+      }
     }
   }
-
+  
   //writeln(allnodes, alljobs);
-  foreach ( j ; alljobs) 
+  foreach ( ref j ; alljobs) 
     {
-      foreach( k ; j.allocations ) {
-         //writeln(k,j,j.allocations);
+      foreach( k ; j.node_list ) {
+	 j.cores[k] = j.cpus[k].length.to!int / allnodes[k].threads_per_core;
          allnodes[k].jobs ~= j ;
 	}
       allparts[j.partition].jobs ~= j ;
@@ -479,77 +564,63 @@ void main(string[] args)
 
   bool print_mark=false;
 
-  auto mhead=" node↔";
+  auto mhead="   node name ↔";
   if (display_node) mhead ~=" OS mem HD";
-  mhead ~= " busy cores state";
+  mhead ~= "   busy cores state";
   if (display_node) mhead ~=" load";
   mhead ~= " alloc cores in: ";
   writef(mhead);
 
-  foreach( p ; allparts) writef("%1s%s ".color(p.color),toChars!(16, char, LetterCase.upper)(p.idx),p.name);
-  writeln("partition");
 
+  auto part_array = allparts.byValue.array.sort!((a, b) => a.idx < b.idx).array;
+  if(partition_select!="")
+    part_array = part_array.filter!(p => p.name==partition_select).array;
+
+  /*
+  foreach( p ; part_array) {
+    writef("%1s".color(p.color),p.label);
+    writef("%s ",p.name);
+  }
+  */  
+  writeln("partitions");
+
+  
   int sum_cores=0;
 
-  //auto nodes=executeShell("nodeattr -s ubuntu-14.04");
-  //enforce(nodes.status == 0 , "Failed to call nodeattr utility.",nodes.output);
-  //auto node_array=nodes.output.split();
+  auto node_array = allnodes.byValue.array.sort!((a, b) => a.idx < b.idx).array;
+  if(partition_select!="")
+    node_array = node_array.filter!(n => n.parts.canFind!(p => p==partition_select)).array;
 
-  Node[] node_array;
-  node_array.length=allnodes.length;
-
-  auto i=0;
-  foreach( nn ; allnodes) {
-    node_array[i]=nn;
-    i++;
-  }
-
-  node_array.sort!((a,b) {return a.idx < b.idx;});
-
-  //writeln(node_array);
-
+  
   foreach ( nn ; node_array)
-    {
+      {
 
-      auto node=nn; //allnodes[nn.name];
+      auto node=nn;
 
+      //writeln(node.features);
+      //writeln(node.state, "->", status_name.get(node.state,"----"));
+      
       string mark=" ";
       if (node.load>0.2 && node.state=="IDLE") mark="!";
       if (node.load>node.threads_per_core*node.cores+0.2) mark="!";
       if (mark!=" ") print_mark=true;
 
       auto net="↔";
-      if ("InfiniBand" in node.feature) net="⇌";
-      if ("InfiniBand100" in node.feature) net="⇄";
-      auto hd_size="o";
-      if (node.hd_size > 0 ) hd_size=".";
-      if (node.hd_size > 100 ) hd_size=":";
-      
-      //writef("%1s%4s%1s (%2d of %2d) %6s %4s ",mark, node.name, net, node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"),load);
+      if ("ib" in node.feature) net="⇄";
+
       writef("%1s%12s%1s",mark, node.name, net);
       if (display_node) writef(" %3s %3d %3d", node.os, node.mem, node.hd_size);
       writef(" (%3d of %3d) %5s ", node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"));
       if (display_node) writef(" % 3.0f ",node.load);
 
-      auto n=allparts.length;
-        //writeln(node.parts);
-      foreach( p ; allparts) {
-      	if(node.parts.get(p.name,false)) {
-          //writef("█".color(p.color));
-          writef("%1s".color(p.color),toChars!(16, char, LetterCase.upper)(p.idx));
-          //writef("\u25FC".color(p.color));
-          //writef("|".color(p.color));
-        n-=1;
-        }
+      foreach( p ; node.parts) {
+	auto pp = allparts[p];
+	writef("%1s".color(pp.color),pp.label);
       }
-      writef(" ".replicate(n-2));
+      writef(" ".replicate(10-node.parts.length));
 
-      //string[string] online=["ALLOCATED":"full", "IDLE":"free", "MIXED":"part", "IDLE+COMPLETING":"wait"];        
-      //if (node.state in online ) sum_cores += node.cores;
       sum_cores += node.cores;
 
-      //writef(node.state);
-      
       auto sum=0;
       int[] map;
       wchar[] smap;
@@ -559,7 +630,7 @@ void main(string[] args)
       smap.length=node.cores;
       cmap.length=node.cores;
 
-      //writeln("x",node,node.jobs,"x");
+      //writeln("xxxx cores=",node.cores," tperc=",node.threads_per_core," cpus=",node.cpus,"xxxx");
 
       writef(" |");
 
@@ -568,21 +639,29 @@ void main(string[] args)
         smap[k]='-';
         cmap[k]=part_color["other"];
       }
-      if(node.up) for(auto k=0; k<node.cores; k++) {map[k]=0; smap[k]=ids[0]; cmap[k]=part_color["free"];}
+      if(node.up) for(auto k=0; k<node.cores; k++) {map[k]=0; smap[k]=ids[0]; cmap[k]=part_color["other"];}
 
       foreach ( j; node.jobs)
         {
           auto job=j; //alljobs[j];
-          //writeln("x",job,"x");
+          //if (job.info["NumTasks"]==job.info["NumCPUs"]) writeln("x-->",job.info["NumTasks"]," ",job.info["NumCPUs"]," ",job.info["NumNodes"]);
+	  //writeln("x-->",job.info["NumTasks"]," ",job.info["NumCPUs"]," ",job.info["NumNodes"]);
+
+          //writeln("x-->",job.info,"---x");
           if(job.state=="RUNNING") {
-            for(auto k=0; k<job.cpus[node.name].length ; k+=2) {
-              auto cpuid=to!int(job.cpus[node.name][k]/2);
+	    //writeln("xxxx cores=",node.cores," tperc=",node.threads_per_core," cpus=",node.cpus,"xxxx");
+	    //writeln(">",job.info);
+	    //writeln(">",job.cpus[node.name]);
+            //for(auto k=0; k<job.cpus[node.name].length ; k++) {
+            //  auto cpuid=to!int(job.cpus[node.name][k]);
+            foreach(k; job.cpus[node.name]) {
+              auto cpuid=k ; //to!int(k);
               //if(cpuid>=node.cores) cpuid-=node.cores;
               //writeln(">",k,cpuid,node.cores);
-              map[cpuid] +=1 ;
+              map[cpuid%node.cores] +=1 ;
               if(node.up) {
-                smap[cpuid] = ids[map[cpuid]];
-                cmap[cpuid]=part_color.get(job.partition,part_color["other"]);
+                smap[cpuid%node.cores] = ids[map[cpuid%node.cores]];
+                cmap[cpuid%node.cores]=part_color.get(job.partition,part_color["other"]);
               } else {
                 smap[cpuid] = ids[0];
                 cmap[cpuid]=part_color.get(job.partition,part_color["other"]);
@@ -615,7 +694,7 @@ void main(string[] args)
               }
               writef("[");
               writef("%s".color(part_color.get(job.partition,part_color["other"])),id);
-              writef("%d".color(part_color.get(job.partition,part_color["other"])),job.cpus[node.name].length/2);
+              writef("%d".color(part_color.get(job.partition,part_color["other"])),j.cores[node.name]);
               writef("]");
               }
             }
@@ -676,34 +755,36 @@ void main(string[] args)
   int sum_pjobs=0;
   int sum_pcores=0;
 
-  writeln("partition  allocation duration   cores  jobs running     [ queue  % ]       jobs in queue    next job to go in hh:mm");
-  foreach ( p ; allparts ) { 
-    writef("%1s%12s ".color(p.color),toChars!(16, char, LetterCase.upper)(p.idx),p.name);
+  writeln("partition         allocation duration     cores  jobs running      [ queue  % ]       jobs in queue    next job to go in hh:mm");
+
+  foreach ( p ; part_array ) { 
+    writef("%1s".color(p.color),p.label);
+    writef("%16s ",p.name);
     if (p.def_time.isNegative()) {
       writef("%-22s ", p.max_time.to!string);
     }
     else {
       writef("%-12s (max %3dh)", p.def_time.to!string, p.max_time.total!"hours");
     }
-    writef(" %4d", p.cores/2);
+    writef(" %5d", p.cores);
 
     //p.pending.sort!("a.start_time < b.start_time");
     p.pending.sort!("a.priority > b.priority");
 
     auto sum=0;
     foreach( j ; p.running) {
-      sum += j.tasks/2;
+      sum += j.tasks;
       //writef("( %d %d)\n",j.ncpus, j.tasks);
     }
-    writef("   %3d (%3d cores)", p.running.length, sum);
-    writef(" %s",  percent_bar(p.cores/2,sum,10) );
+    writef("  %4d (%4d cores)", p.running.length, sum);
+    writef(" %s",  percent_bar(p.cores,sum,10) );
     sum_rjobs += p.running.length;
     sum_rcores += sum;
 
     sum=0;
     foreach( j ; p.pending) sum += j.ncpus;
-    writef("  %3d (%3d cores)  ", p.pending.length, sum);
-    //writef(" %s",  percent_bar(p.cores/2,sum,10) );
+    writef("  %3d (%4d cores)  ", p.pending.length, sum);
+    //writef(" %s",  percent_bar(p.cores,sum,10) );
     sum_pjobs += p.pending.length;
     sum_pcores += sum;
 
@@ -732,7 +813,7 @@ void main(string[] args)
     writef("\n");
   }
 
-  string line=format(" %8s  %-20s   %4d   %3d (%3d cores) %s  %3d (%3d cores)".color(Color.bgBlack).color(Color.fgWhite),"TOTAL","", sum_cores, sum_rjobs, sum_rcores, percent_bar(sum_cores,sum_rcores,10), sum_pjobs, sum_pcores);
+  string line=format(" %16s  %-20s    %4d %5d (%4d cores) %s  %3d (%4d cores)".color(Color.bgBlue).color(Color.fgWhite),"TOTAL","", sum_cores, sum_rjobs, sum_rcores, percent_bar(sum_cores,sum_rcores,10), sum_pjobs, sum_pcores);
   writeln(line);
 }
 
