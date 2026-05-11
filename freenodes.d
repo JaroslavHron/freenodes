@@ -643,8 +643,6 @@ void main(string[] args)
 
       //writeln("xxxx cores=",node.cores," tperc=",node.threads_per_core," cpus=",node.cpus,"xxxx");
 
-      writef(" |");
-
       for(auto k=0; k<node.cores; k++) {
         map[k]=0;
         smap[k]='-';
@@ -683,13 +681,15 @@ void main(string[] args)
           }
         }
 
-      for( auto k=0; k<node.cores; k++) 
-        {
-          writef("%s".color(cmap[k]),smap[k]);
-        }
-
-      writef("|");
-      writef(" ");
+      writef(" [");
+      for( auto l=0; l<node.sockets; l++){
+	for( auto k=0; k<node.cores_per_socket; k++) {
+	  auto m=l*node.cores_per_socket+k;
+	  writef("%s".color(cmap[m]),smap[m]);
+	}
+	if (l<node.sockets-1) writef("|");
+      }
+      writef("] ");
 
       if(display_user || display_time || display_id)
         {
