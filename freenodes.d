@@ -461,6 +461,17 @@ string active_cluster="";
 string partition_select="";
 
 
+/* This is assumption on slurm logical to physical map on cpus (=threads)
+   I don't know how to get this from slurm, it can be obtaoned on given machine by
+
+   hwloc-ls --no-io --only pu --of console
+
+*/
+
+//auto coreid = (int cpuid, int ncores) => cpuid%ncores; //asuming cpuid 0,16 are on the same core
+auto coreid = (int cpuid, int ncores) => cpuid/2; //asuming cpuid 0,1 are on the same core
+
+
 void main(string[] args)
 {
   
@@ -610,7 +621,7 @@ void main(string[] args)
 
       writef("%1s%12s%1s",mark, node.name, net);
       if (display_node) writef(" %3s %3d %3d", node.os, node.mem, node.hd_size);
-      writef(" (%3d of %3d) %5s ", node.cpu_alloc/node.threads_per_core, node.cores, status_name.get(node.state,"----"));
+      writef(" (%3d of %3dx%1d) %5s ", node.cpu_alloc/node.threads_per_core, node.cores, node.threads_per_core, status_name.get(node.state,"----"));
       if (display_node) writef(" % 3.0f ",node.load);
 
       foreach( p ; node.parts) {
@@ -658,10 +669,11 @@ void main(string[] args)
               auto cpuid=k ; //to!int(k);
               //if(cpuid>=node.cores) cpuid-=node.cores;
               //writeln(">",k,cpuid,node.cores);
-              map[cpuid%node.cores] +=1 ;
+
+              map[coreid(cpuid,node.cores)] +=1 ;  
               if(node.up) {
-                smap[cpuid%node.cores] = ids[map[cpuid%node.cores]];
-                cmap[cpuid%node.cores]=part_color.get(job.partition,part_color["other"]);
+                smap[coreid(cpuid,node.cores)] = ids[map[coreid(cpuid,node.cores)]];
+                cmap[coreid(cpuid,node.cores)]=part_color.get(job.partition,part_color["other"]);
               } else {
                 smap[cpuid] = ids[0];
                 cmap[cpuid]=part_color.get(job.partition,part_color["other"]);
