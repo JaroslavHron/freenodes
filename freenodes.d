@@ -58,7 +58,8 @@ struct Node {
   int disk_free;
   string features; 
   bool[string] feature; 
-  string state;
+  string[] state;
+  string state_full;
   string sload;
   float load;
   Job[] jobs;
@@ -99,6 +100,7 @@ struct Job {
   Duration time_limit;
   Duration time;
   string state;
+  string state_full;
   string reason;
   ulong priority;
   int nodes;
@@ -433,7 +435,8 @@ auto scontrol_nodes_info()
       foreach(string f ; n.features.split(",")) n.feature[f]=true;
       n.sload=aa["CPULoad"].strip();
       try n.load=n.sload.to!float; catch (ConvException) n.load=-1.0;
-      n.state=aa["State"].split("+")[0];
+      n.state=aa["State"].split("+");
+      n.state_full=aa["State"];
       n.cores=n.sockets*n.cores_per_socket;
       n.os=aa.get("OS", "unkown");
       nodes[n.name]=n;
@@ -447,7 +450,6 @@ wchar[] ids=['.','+','#','!','!','!','!','!','!'];
 string charset = "0123456789" ~ "ABCDEFGHIJKLMNOPQRSTUVWXYZ" ~ "abcdefghijklmnopqrstuvwxyz" ~ "!@#$%"; 
 
 Color[string] part_color;
-string[string] status_name;
 
 bool display_user=true;
 bool display_time=false;
@@ -469,18 +471,30 @@ string partition_select="";
 */
 
 //auto coreid = (int cpuid, int ncores) => cpuid%ncores; //asuming cpuid 0,16 are on the same core
-auto coreid = (int cpuid, int ncores) => cpuid/2; //asuming cpuid 0,1 are on the same core
+auto coreid = (int cpuid, int ncores, int tpc) => cpuid/tpc; //asuming cpuid 0,1 are on the same core
 
+auto status_name = (string[] x) {
+  auto base_names=[
+	       "ALLOCATED":" full",
+	       "IDLE":" free",
+	       "MIXED":" part",
+	       "DOWN":" down",
+	       "COMPLETING": "compl",
+	       "FAIL": " fail",
+	       "FAILING": " fail",
+	       "FUTURE": "futur",
+	       "MAINT": "maint",
+	       "RESERVED": "resrv",
+	       "UNKNOWN": " ????"
+	       ];
+  auto name = base_names.get(x[0], " ????");
+  if (x.any!(s => s.canFind("DRAIN"))) name = "drain";
+  return(name);
+};
 
 void main(string[] args)
 {
   
-  status_name=[
-	       "ALLOCATED":"full",
-	       "IDLE":"free",
-	       "MIXED":"part",
-	       "DOWN":"down",
-	       ];
   
  auto helpInformation = getopt(args, std.getopt.config.passThrough, std.getopt.config.bundling,
 				"cluster|c", "Select the cluster", &active_cluster,
@@ -529,7 +543,7 @@ void main(string[] args)
 
   foreach ( ref n ; allnodes) 
     {
-      auto state = status_name.get(n.state,"unknown");
+      auto state = status_name(n.state);
       n.up = true;
       if (state=="down") n.up=false;
     }
@@ -568,16 +582,25 @@ void main(string[] args)
 	 j.cores[k] = j.cpus[k].length.to!int / allnodes[k].threads_per_core;
          allnodes[k].jobs ~= j ;
 	}
-      allparts[j.partition].jobs ~= j ;
+      //writeln(j.partition);
+      //allparts[j.partition].jobs ~= j ;
+      foreach (item; j.partition.splitter(",")) 
+	{
+	  allparts[item.strip()].jobs ~= j; 
+	}
       if(j.state=="RUNNING") allparts[j.partition].running ~= j;
-      else if(j.state=="PENDING") allparts[j.partition].pending ~= j;
+      else if(j.state=="PENDING")
+	{
+	  foreach (item; j.partition.splitter(",")) 
+	    allparts[item.strip()].pending ~= j;
+	}
     }
 
   bool print_mark=false;
 
-  auto mhead="   node name ↔";
+  auto mhead="  node name ↔";
   if (display_node) mhead ~=" OS mem HD";
-  mhead ~= "   busy cores state";
+  mhead ~= "     busy cores state";
   if (display_node) mhead ~=" load";
   mhead ~= " alloc cores in: ";
   writef(mhead);
@@ -609,19 +632,20 @@ void main(string[] args)
       auto node=nn;
 
       //writeln(node.features);
-      //writeln(node.state, "->", status_name.get(node.state,"----"));
+      //writeln(node.state_full, ":", node.state, "->", status_name(node.state));
       
-      string mark=" ";
-      if (node.load>0.2 && node.state=="IDLE") mark="!";
-      if (node.load>node.threads_per_core*node.cores+0.2) mark="!";
-      if (mark!=" ") print_mark=true;
+      //string mark=" ";
+      //if (node.load>0.2 && node.state[0]=="free") mark="!";
+      //if (node.load>node.threads_per_core*node.cores+0.2) mark="!";
+      //if (mark!=" ") print_mark=true;
 
       auto net="↔";
       if ("ib" in node.feature) net="⇄";
 
-      writef("%1s%12s%1s",mark, node.name, net);
+      //writef("%1s%12s%1s",mark, node.name, net);
+      writef("%12s%1s", node.name, net);
       if (display_node) writef(" %3s %3d %3d", node.os, node.mem, node.hd_size);
-      writef(" (%3d of %3dx%1d) %5s ", node.cpu_alloc/node.threads_per_core, node.cores, node.threads_per_core, status_name.get(node.state,"----"));
+      writef(" (%3d of %3dx%1d) %5s ", node.cpu_alloc/node.threads_per_core, node.cores, node.threads_per_core, status_name(node.state));
       if (display_node) writef(" % 3.0f ",node.load);
 
       foreach( p ; node.parts) {
@@ -653,25 +677,17 @@ void main(string[] args)
       foreach ( j; node.jobs)
         {
           auto job=j; //alljobs[j];
-          //if (job.info["NumTasks"]==job.info["NumCPUs"]) writeln("x-->",job.info["NumTasks"]," ",job.info["NumCPUs"]," ",job.info["NumNodes"]);
-	  //writeln("x-->",job.info["NumTasks"]," ",job.info["NumCPUs"]," ",job.info["NumNodes"]);
 
-          //writeln("x-->",job.info,"---x");
           if(job.state=="RUNNING") {
-	    //writeln("xxxx cores=",node.cores," tperc=",node.threads_per_core," cpus=",node.cpus,"xxxx");
-	    //writeln(">",job.info);
-	    //writeln(">",job.cpus[node.name]);
-            //for(auto k=0; k<job.cpus[node.name].length ; k++) {
-            //  auto cpuid=to!int(job.cpus[node.name][k]);
+
             foreach(k; job.cpus[node.name]) {
               auto cpuid=k ; //to!int(k);
-              //if(cpuid>=node.cores) cpuid-=node.cores;
-              //writeln(">",k,cpuid,node.cores);
 
-              map[coreid(cpuid,node.cores)] +=1 ;  
+	      auto ii = coreid(cpuid,node.cores,node.threads_per_core);
+              map[ii] +=1 ;  
               if(node.up) {
-                smap[coreid(cpuid,node.cores)] = ids[map[coreid(cpuid,node.cores)]];
-                cmap[coreid(cpuid,node.cores)]=part_color.get(job.partition,part_color["other"]);
+                smap[ii] = ids[map[ii]];
+                cmap[ii]=part_color.get(job.partition,part_color["other"]);
               } else {
                 smap[cpuid] = ids[0];
                 cmap[cpuid]=part_color.get(job.partition,part_color["other"]);
@@ -713,7 +729,7 @@ void main(string[] args)
         }
       writeln("");
     }
-  if(print_mark) writeln("Notes: !-marked nodes are overcommited or busy with job outside the slurm control.");
+  //if(print_mark) writeln("Notes: !-marked nodes are overcommited or busy with job outside the slurm control.");
 
   Job[] running, pending, cancelled;
   foreach (j; alljobs) {
