@@ -496,9 +496,12 @@ void main(string[] args)
 {
   
   
- auto helpInformation = getopt(args, std.getopt.config.passThrough, std.getopt.config.bundling,
+ auto helpInformation = getopt(args,
+			       std.getopt.config.passThrough,
+			       std.getopt.config.bundling,
+			       std.getopt.config.caseSensitive,
 				"cluster|c", "Select the cluster", &active_cluster,
-				"list_clusters|l", "List available clusters", &list_clusters,
+				"list|l", "List available clusters", &list_clusters,
                                 "id|i", "Display the job id", &display_id,
 				"jobs|j", "Display running jobs info", &display_jobs,
                                 "node|n", "Display the node details", &display_node,
@@ -771,7 +774,6 @@ void main(string[] args)
     if (part>total) part=total;
     if (part>0) x=(N*part)/total;
     string fmt = format("[%%%ds%%%ds] %%3d%%%%",x,N-x);
-    //string output = format(fmt,"▌".replicate(x),"▒".replicate(N-x),x);
     int aux=0;
     if (total>0) aux=(100*part)/total;
     string output = format(fmt,"|".replicate(x),".".replicate(N-x),aux);
@@ -783,7 +785,7 @@ void main(string[] args)
   int sum_pjobs=0;
   int sum_pcores=0;
 
-  writeln("partition         allocation duration     cores  jobs running      [ queue  % ]       jobs in queue    next job to go in hh:mm");
+  writeln("partition         allocation   duration   cores  jobs running     [ queue  % ]      jobs in queue     next job to go in hh:mm");
 
   foreach ( p ; part_array ) { 
     writef("%1s".color(p.color),p.label);
@@ -804,14 +806,14 @@ void main(string[] args)
       sum += j.tasks;
       //writef("( %d %d)\n",j.ncpus, j.tasks);
     }
-    writef("  %4d (%4d cores)", p.running.length, sum);
+    writef("  %4d (%4d cpus)", p.running.length, sum);
     writef(" %s",  percent_bar(p.cores,sum,10) );
     sum_rjobs += p.running.length;
     sum_rcores += sum;
 
     sum=0;
     foreach( j ; p.pending) sum += j.ncpus;
-    writef("  %3d (%4d cores)  ", p.pending.length, sum);
+    writef("  %3d (%4d cpus)  ", p.pending.length, sum);
     //writef(" %s",  percent_bar(p.cores,sum,10) );
     sum_pjobs += p.pending.length;
     sum_pcores += sum;
@@ -841,7 +843,7 @@ void main(string[] args)
     writef("\n");
   }
 
-  string line=format(" %16s  %-20s    %4d %5d (%4d cores) %s  %3d (%4d cores)".color(Color.bgBlue).color(Color.fgWhite),"TOTAL","", sum_cores, sum_rjobs, sum_rcores, percent_bar(sum_cores,sum_rcores,10), sum_pjobs, sum_pcores);
+  string line=format(" %16s  %-20s   %4d %5d (%4d cpus) %s  %3d (%4d cpus)".color(Color.bgBlue).color(Color.fgWhite),"TOTAL","", sum_cores, sum_rjobs, sum_rcores, percent_bar(sum_cores,sum_rcores,10), sum_pjobs, sum_pcores);
   writeln(line);
 }
 
