@@ -22,6 +22,7 @@ import std.exception;
 import std.algorithm;
 import std.datetime;
 import std.typecons : tuple;
+import std.json;
 
 // color support
 enum Color : int {
@@ -43,7 +44,7 @@ struct Cluster {
 struct Node { 
   uint idx;
   string name;
-  string[string] info;
+  JSONValue info;
   int sockets; 
   int cores_per_socket;
   int threads_per_core;
@@ -70,7 +71,7 @@ struct Node {
 struct Part { 
   uint idx;
   string name;
-  string[string] info;
+  JSONValue info;
   char label;
   Color color;
   bool[string] feature;
@@ -89,7 +90,7 @@ struct Job {
   uint idx;
   string name;
   int id;
-  string[string] info;
+  JSONValue info;
   string partition;
   string account;
   string user;
@@ -201,6 +202,13 @@ auto slurm_expand_hosts(string hosts)
 }
 
 // parse interval in the form  [days-]hh:mm:ss
+Duration parse_time_number(long t)
+{
+  auto dur=minutes(t);
+  return(dur);
+}
+
+// parse interval in the form  [days-]hh:mm:ss
 Duration parse_time_interval(string t)
 {
 
@@ -257,13 +265,14 @@ auto slurm_clusters_info()
 // fill the Part structure from the `scontrol -a -o -d show part`
 auto scontrol_parts_info()
 {
-  auto cmd=format("scontrol -a -o -d -M %s show part",active_cluster);
+  auto cmd=format("SLURM_JSON=compact scontrol --json=v0.0.45 -a -o -d -M %s show part",active_cluster);
   scope(failure) {
       writeln("Failed to call scontrol utility: " ~ cmd);
   }
   
   auto result=executeShell(cmd);
-  auto output=result.output.strip().split("\n");
+  auto output=result.output;
+  immutable json = parseJSON(result.output);
   
   if (result.status != 0) {
     writeln("Failed to call scontrol utility.\n" ~ result.output);
@@ -272,29 +281,20 @@ auto scontrol_parts_info()
 
   Part[string] parts;
 
-  foreach(i, string l; output)
-    {
-      scope(failure) writeln("Failed to parse:" ~ l);
+  foreach (i, pp; json["partitions"].array) {
+    scope(failure) writeln("Failed to parse:" ~ pp.str);
 
-      auto slurmReg = ctRegex!r"(?P<var>[^ =]+)=(?P<value>[^ ]+)";
-      auto cx = matchAll(l, slurmReg)
-        .map!(t => tuple(t["var"], t["value"]))
-        .array;
-
-      auto aa = assocArray(cx);
-      aa.rehash;
-      
       auto p=Part();
-      p.name=aa["PartitionName"];
-      p.info=aa;
+      p.name=pp["name"].str;
+      p.info=pp;
 
-      p.max_time=parse_time_interval(aa["MaxTime"]); 
-      p.def_time=parse_time_interval(aa["DefaultTime"]);
+      p.max_time=parse_time_number(pp["maximums"]["time"]["number"].integer); 
+      p.def_time=parse_time_number(pp["defaults"]["time"]["number"].integer);
 
-      p.priority=aa.get("Priority", "0").to!ulong;
-      p.cpus=aa["TotalCPUs"].to!int;
+      p.priority=pp["priority"]["tier"].integer;
+      p.cpus=pp["cpus"]["total"].integer.to!int;
 
-      auto nlex=slurm_expand_hosts(aa["Nodes"]);
+      auto nlex=slurm_expand_hosts(pp["nodes"]["configured"].str);
       p.nodes=nlex;
       p.color=Color.none;
 
@@ -305,13 +305,15 @@ auto scontrol_parts_info()
 
 auto scontrol_jobs_info()
 {
-  auto cmd=format("scontrol -a -o -d -M %s show job", active_cluster);
+  auto cmd=format("SLURM_JSON=compact scontrol --json=v0.0.45 -a -o -d -M %s show job", active_cluster);
   scope(failure) {
       writeln("Failed to call scontrol utility: " ~ cmd);
   }
 
   auto result=executeShell(cmd);
-  auto output=result.output.strip().split("\n");
+  auto output=result.output;
+  immutable json = parseJSON(result.output);
+
   if (result.status != 0) {
     writeln("Failed to call scontrol utility.\n" ~ result.output);
     output.length=0;
@@ -320,88 +322,76 @@ auto scontrol_jobs_info()
   Job[int] jobs;
 
   if(output.length==0) return(jobs);
-  if(!cmp(output[0],"No jobs in the system")) return(jobs);
+  // TODO if(!cmp(output[0],"No jobs in the system")) return(jobs);
 
-  auto slurmReg = ctRegex!r"(?P<var>[^ =]+)=(?P<value>[^ ]+)";
- 
-  foreach(i, string l; output)
-    {
+  foreach (i, jj; json["jobs"].array) {
+    
       auto j=Job();
-      scope(failure) {writeln("Failed to parse:" ~ l); writeln(j);}
+      scope(failure) {writeln("Failed to parse:" ~ jj.toString); writeln(jj.toString);}
 
-      auto cx = matchAll(l, slurmReg)
-        .map!(t => tuple(t["var"], t["value"]))
-        .array;
 
-      //writeln(cx);
-      auto aa = assocArray(cx);
-      aa.rehash;
-      //writeln(aa);
-      
+      j.name=jj["name"].str;
+      j.info=jj;
 
-      j.name=aa["JobName"];
-      j.info=aa;
+      j.id=jj["job_id"].integer.to!int;
+      j.priority=jj["priority"]["number"].integer;
+      j.state=jj["job_state"][0].str;
+      j.reason=jj["state_reason"].str;
+      j.partition=jj["partition"].str;
+      j.user=jj["account"].str;
+      j.user=jj["user_name"].str;
 
-      j.id=aa["JobId"].to!int;
-      j.priority=aa["Priority"].to!ulong;
-      j.state=aa["JobState"];
-      j.reason=aa["Reason"];
-      j.partition=aa["Partition"];
-      j.account=aa["Account"];
-      j.user=aa["UserId"].split("(")[0];
-  
-      j.run_time=parse_time_interval(aa["RunTime"]);
-
-      try j.time_limit=parse_time_interval(aa["TimeLimit"]); 
+      j.run_time=parse_time_number(jj["accrue_time"]["number"].integer);
+      try j.time_limit=parse_time_number(jj["time_limit"]["number"].integer); 
       catch(TimeException) j.time_limit=days(365);
 
-      j.submit_time=DateTime.fromISOExtString(aa["SubmitTime"]);
-      try j.start_time=DateTime.fromISOExtString(aa["StartTime"]);
+      j.submit_time=SysTime.fromUnixTime(jj["submit_time"]["number"].integer).to!DateTime;
+      try j.start_time=SysTime.fromUnixTime(jj["start_time"]["number"].integer).to!DateTime;
       catch(TimeException) j.start_time=j.submit_time;
+
+      if(j.state=="RUNNING") {
+        try j.end_time=SysTime.fromUnixTime(jj["end_time"]["number"].integer).to!DateTime;
+	catch(TimeException) j.end_time=j.submit_time;
+	}
+      else j.end_time=j.start_time+j.time_limit;
+     
+      auto dur0=j.time_limit-j.run_time;
+      j.time=dur0;
+    
+      j.nodes=jj["node_count"]["number"].integer.to!int;
+      j.ncpus=jj["cpus"]["number"].integer.to!int;
       
-      j.nodes=aa["NumNodes"].split("-")[0].to!int;
-      j.ncpus=aa["NumCPUs"].split("-")[0].to!int;
       int np=0;
 
       if(j.state=="RUNNING") {
-	try j.end_time=DateTime.fromISOExtString(aa["EndTime"]);
-	catch(TimeException) j.end_time=DateTime(3000, 1, 1,0,0,0);
+        np=jj["job_resources"]["cpus"].integer.to!int;
 	
-	//writeln(aa["NodeList"]);
-	//writeln(cx.filter!(t => t[0] == "Nodes"));
-	j.node_list=slurm_expand_hosts(aa["NodeList"]);
-	auto nN = cx.filter!(t => t[0] == "Nodes").array;
-	auto nC = cx.filter!(t => t[0] == "CPU_IDs").array;
-	auto nM = cx.filter!(t => t[0] == "Mem").array;
+        //foreach(ii, k; jj["job_resources"]["allocation"].array){
+	//auto kname=k["nodename"].str; 
+	//j.cpus[kname]=k["cpus_used"].integer.to!int;
+	//j.mem[kname]=k["memory_used"].integer.to!int;
+	//}
 	
-	for(auto o=0; o<nN.length; o++)  
-	  {
-	    auto tmpn=slurm_expand_hosts(nN[o][1]);
-	    auto tmpnp=scontrol_expand_cpuids(nC[o][1]);
-	    auto mem=nM[o][1].to!int;
-	    foreach(k;tmpn) {
-	      np+=tmpnp.length;
-	      j.cpus[k]=tmpnp;
-	      j.mem[k]=mem;
-	    }
-	  }
-	//writeln(j.node_list);
-	//writeln(j.cpus);
-
+	j.tasks=np; 
+	// FIXME!!!!
+	//j.allocations=scontrol_expand_hosts(jj["job_resources"]["nodes"].str);
       }
-      j.tasks=np;
-      j.time=j.time_limit-j.run_time;
-      
       jobs[j.id]=j;
-    }
+  }
   return(jobs);
 }
 
 auto scontrol_nodes_info()
 {
-  auto cmd=format("scontrol -a -o -d -M %s show node", active_cluster);
+  auto cmd=format("SLURM_JSON=compact scontrol --json=v0.0.45 -a -o -d -M %s show node", active_cluster);
+  scope(failure) {
+      writeln("Failed to call scontrol utility: " ~ cmd);
+  }
+
   auto result=executeShell(cmd);
-  auto output=result.output.strip().split("\n");
+  auto output=result.output;
+  immutable json = parseJSON(result.output);
+
   if (result.status != 0) {
     writeln("Failed to call scontrol utility.\n" ~ result.output);
     output.length=0;
@@ -410,41 +400,32 @@ auto scontrol_nodes_info()
   Node[string] nodes;
 
   auto idx=0;
-  foreach(i, string l; output)
-    {
-      scope(failure) writeln("Failed to parse:" ~ l);
+  
+  foreach (i, l; json["nodes"].array) {
+      scope(failure) writeln("Failed to parse:" ~ l.toString);
       auto n=Node();
       idx++;
 
-      auto slurmReg = ctRegex!r"(?P<var>[^ =]+)=(?P<value>[^ ]+)";
-      auto cx = matchAll(l, slurmReg)
-        .map!(t => tuple(t["var"], t["value"]))
-        .array;
-
-      auto aa = assocArray(cx);
-      aa.rehash;
-      
-      n.name=aa["NodeName"];
+      n.name=l["name"].str;
       n.idx=idx;
-      n.info=aa;
+      n.info=l;
 
-      n.sockets=aa["Sockets"].to!int;
-      n.cores_per_socket=aa["CoresPerSocket"].to!int;
-      n.threads_per_core=aa["ThreadsPerCore"].to!int;
-      n.cpus=aa["CPUTot"].to!int;
-      n.mem=aa["RealMemory"].to!int;
-      n.mem_alloc=aa["AllocMem"].to!int;
-      n.hd_size=aa["TmpDisk"].to!int;
-      n.cpu_alloc=aa["CPUAlloc"].to!int;
-      n.features=aa["AvailableFeatures"].strip();
-      foreach(string f ; n.features.split(",")) n.feature[f]=true;
-      n.sload=aa["CPULoad"].strip();
-      try n.load=n.sload.to!float; catch (ConvException) n.load=-1.0;
+      n.sockets=l["sockets"].integer.to!int;
+      n.cores_per_socket=n.cores/n.sockets;
+      n.threads_per_core=l["threads"].integer.to!int;
+      n.cpus=l["cpus"].integer.to!int;
+      n.mem=l["real_memory"].integer.to!int;
+      n.mem_alloc=l["alloc_memory"].integer.to!int;
+      n.hd_size=l["temporary_disk"].integer.to!int;
+      n.cpu_alloc=l["alloc_cpus"].integer.to!int;
+      n.features=l["features"].toString;
+      foreach(ik, k ; l["features"].array) n.feature[k.str]=true;
+      n.load=l["cpu_load"].integer.to!int/100.0;
 
-      n.state=aa["State"].split("+");
-      n.state_full=aa["State"];
+      n.state=l["state"][0].str.split("+");
+      n.state_full=l["state"][0].str;    
       n.cores=n.sockets*n.cores_per_socket;
-      n.os=aa.get("OS", "unkown");
+      n.os=l["operating_system"].str;
       nodes[n.name]=n;
     }
   
